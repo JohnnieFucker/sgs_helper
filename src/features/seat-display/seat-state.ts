@@ -39,13 +39,24 @@ export interface GameSeatSnapshot {
   unknownCardCount: number;
 }
 
+/** 明牌只把国战当成特殊规则；其余模式共用身份局的移牌纠偏。 */
+export type GameMode =
+  | 'identity'
+  | 'nation-war'
+  | 'doudizhu'
+  | 'rogue'
+  | 'rogue-1v1'
+  | 'swjg'
+  | 'spectator'
+  | 'unknown';
+
 export interface SeatStateSnapshot {
   inGame: boolean;
   isSpectating: boolean;
   selfSeatId: number | null;
   /** 单人模式通常只有一项；多控制角色模式可同时拥有多个座位。 */
   controlledSeatIds: number[];
-  mode: 'identity' | 'nation-war' | 'spectator' | 'unknown';
+  mode: GameMode;
   playerCount: number;
   seats: GameSeatSnapshot[];
 }
@@ -150,9 +161,36 @@ export function normalizeSeatState(
   };
 }
 
-function normalizeGameMode(value: unknown, isSpectating: boolean): SeatStateSnapshot['mode'] {
+const GAME_MODES = new Set<GameMode>([
+  'identity', 'nation-war', 'doudizhu', 'rogue', 'rogue-1v1', 'swjg', 'spectator', 'unknown'
+]);
+
+/** 场景标记换成明牌用的模式。旁观优先，国战优先于其他玩法标记。 */
+export function resolveGameMode(flags: {
+  spectating?: boolean;
+  nationWar?: boolean;
+  doudizhu?: boolean;
+  rogue?: boolean;
+  rogue1v1?: boolean;
+  swjg?: boolean;
+}): GameMode {
+  if (flags.spectating) return 'spectator';
+  if (flags.nationWar) return 'nation-war';
+  if (flags.doudizhu) return 'doudizhu';
+  if (flags.rogue) return 'rogue';
+  if (flags.rogue1v1) return 'rogue-1v1';
+  if (flags.swjg) return 'swjg';
+  return 'identity';
+}
+
+/** 只有国战改变 7016/7017 的牌堆顶纠偏。 */
+export function isNationWarMode(mode: GameMode): boolean {
+  return mode === 'nation-war';
+}
+
+function normalizeGameMode(value: unknown, isSpectating: boolean): GameMode {
   if (isSpectating) return 'spectator';
-  return value === 'identity' || value === 'nation-war' ? value : 'unknown';
+  return typeof value === 'string' && GAME_MODES.has(value as GameMode) ? value as GameMode : 'unknown';
 }
 
 function normalizeSeatAnchor(value: unknown): GameSeatAnchorSnapshot | null {

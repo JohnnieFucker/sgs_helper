@@ -181,7 +181,9 @@ export function createDeckRecordStore(
       );
     }
 
-    if (event.fromId === DRAW_PILE_OWNER_ID && event.fromZone === DISCARD_ZONE) {
+    // Zone=2 是全局弃牌堆。浏览器协议有时把公共区 owner 留为操作者座位，
+    // 所以移出弃牌区时只按 zone 判断，不能要求 owner 必须是 0xff。
+    if (event.fromZone === DISCARD_ZONE) {
       const removedKnownCount = removeKnownCards(discardCardIds, event.cardIds);
       hiddenDiscardCount = Math.max(
         0,
@@ -198,7 +200,7 @@ export function createDeckRecordStore(
         currentTurnHiddenDiscardCount - Math.max(0, event.cardCount - removedCurrentTurnKnownCount)
       );
     }
-    if (event.toId === DRAW_PILE_OWNER_ID && event.toZone === DISCARD_ZONE) {
+    if (event.toZone === DISCARD_ZONE) {
       const knownCardIds = event.cardIds.filter((cardId) => cardId > 0);
       discardCardIds.push(...knownCardIds);
       hiddenDiscardCount += Math.max(0, event.cardCount - knownCardIds.length);

@@ -2,7 +2,7 @@
  * 座位与游戏对象适配：从场景座位实例读取手牌/身份等字段。
  */
 
-import type { SeatStateSnapshot } from './seat-state.ts';
+import { resolveGameMode, type SeatStateSnapshot } from './seat-state.ts';
 
 /** 游戏对象只在运行时存在，因此适配层只描述迁移所需的最小只读结构。 */
 export interface GameSceneSeatSource {
@@ -11,6 +11,10 @@ export interface GameSceneSeatSource {
   height?: number;
   mySeats?: unknown[];
   isGuoZhan?: boolean;
+  isDouDiZhu?: boolean;
+  isShanHeTu?: boolean;
+  isRoguelike1v1?: boolean;
+  isSWJG?: boolean;
   seatContainer?: {
     seatUIs?: unknown[];
   };
@@ -61,10 +65,7 @@ export function readSeatStateFromGameScene(
       || (readBoolean(seat, ['isSelf', 'IsSelf']) ?? false);
     const isControlled = isSelf || controlledSeatIds.includes(seatId);
     const seatCards = readArray(seat, CARD_LIST_KEYS);
-    const shownHandCards = readArray(seat, SHOWN_HAND_CARD_KEYS)
-      .filter((rawCard) => readBoolean(asRecord(rawCard), ['IsHide', 'isHide']) !== true);
-    // 官方明牌常用 ID 数组（顺手牵羊等获得的牌会写入 HandShowCardIDs）。
-    const shownHandCardIds = readArray(seat, SHOWN_HAND_CARD_ID_KEYS);
+    const shownHandCards = readShownHandEntries(seat, seatUI);
     const cardContainer = asRecord(seatUI?.cardContainer);
     const visibleCardUIs = readArray(cardContainer, CARD_UI_LIST_KEYS);
     const equipCardUIs = [
@@ -79,15 +80,19 @@ export function readSeatStateFromGameScene(
     // 对手只读官方公开数组；确定牌还来自明牌引擎的移动记录。
     // 装备区牌已经在座位装备栏可见，不得并入已知手牌。
     const publicCardUIs = visibleCardUIs.filter((rawCard) => isPubliclyShownCard(rawCard));
-    const knownCards = (isControlled
-      ? [...seatCards, ...shownHandCards, ...shownHandCardIds, ...publicCardUIs]
-      : [...shownHandCards, ...shownHandCardIds])
-      // 2v2 队友的 HandCards 是确定牌，但调用 SetCardUIRemark 会连带触发技能
-      // 文字图层（例如神典韦错误出现“克己”）。私有手牌只读卡号与已有标签。
+    const shownCards = [...shownHandCards, ...publicCardUIs]
+      .flatMap((rawCard) => readKnownCard(rawCard))
+      .filter((card) => !equipmentIds.has(card.cardId));
+    // 2v2 队友的 HandCards 是确定牌，但调用 SetCardUIRemark 会连带触发技能
+    // 文字图层（例如神典韦错误出现“克己”）。私有手牌只读卡号与已有标签。
+    let privateCards = (isControlled ? seatCards : [])
       .flatMap((rawCard) => readKnownCard(rawCard))
       .filter((card) => !equipmentIds.has(card.cardId));
     const handCardCount = readNonNegativeInteger(seat, HAND_COUNT_KEYS)
-      ?? Math.max(seatCards.length, knownCards.length);
+      ?? Math.max(seatCards.length, privateCards.length);
+    // 手牌张数已是 0 时丢掉残留的私有手牌。观星等公开牌不在手牌张数里，不能一起清掉。
+    if (handCardCount === 0) privateCards = [];
+    const knownCards = [...privateCards, ...shownCards];
 
     return [{
       seatId,
@@ -101,7 +106,7 @@ export function readSeatStateFromGameScene(
       anchor: readSeatAnchor(seatUI, gameScene),
       knownCards,
       equipmentCards,
-      unknownCardCount: Math.max(0, handCardCount - knownCards.length)
+      unknownCardCount: Math.max(0, handCardCount - privateCards.length)
     }];
   });
   const selfSeat = seats.find((seat) => seat.isSelf);
@@ -113,9 +118,42 @@ export function readSeatStateFromGameScene(
     controlledSeatIds: controlledSeatIds.length
       ? controlledSeatIds
       : selfSeat ? [selfSeat.seatId] : [],
-    mode: !selfSeat ? 'spectator' : gameScene?.isGuoZhan === true ? 'nation-war' : 'identity',
+    mode: resolveGameMode({
+      spectating: !selfSeat,
+      nationWar: gameScene?.isGuoZhan === true,
+      doudizhu: gameScene?.isDouDiZhu === true,
+      rogue: gameScene?.isShanHeTu === true,
+      rogue1v1: gameScene?.isRoguelike1v1 === true,
+      swjg: gameScene?.isSWJG === true
+    }),
     seats
   };
+}
+
+/**
+ * 网页端展示牌在 HandShowCards，HandShowCardIDs 只增不减，有牌面时不再叠卡号。
+ * 微端观星写在 HandShowCardIDs，牌面列表经常是空数组，空列表时两边都读卡号。
+ */
+export function readShownHandEntries(
+  seat: UnknownRecord | null,
+  seatUi: UnknownRecord | null = null
+): unknown[] {
+  const cards = [
+    ...readArray(seat, SHOWN_HAND_CARD_KEYS),
+    ...readArray(seatUi, SHOWN_HAND_CARD_KEYS)
+  ].filter((rawCard) => readBoolean(asRecord(rawCard), ['IsHide', 'isHide']) !== true);
+  if (cards.length > 0 && !isMicroClient()) return cards;
+  return [
+    ...cards,
+    ...readArray(seat, SHOWN_HAND_CARD_ID_KEYS),
+    ...readArray(seatUi, SHOWN_HAND_CARD_ID_KEYS)
+  ];
+}
+
+/** 微端注入了 electron 桥；浏览器脚本没有。两边的明牌字段不一样。 */
+function isMicroClient(): boolean {
+  const bridge = (globalThis as { electron?: { openExternal?: unknown } }).electron;
+  return typeof bridge?.openExternal === 'function';
 }
 
 function equipmentHints(name: string): string[] {

@@ -5,6 +5,7 @@
 
 import type { GameEvent, GameEventBus } from '../../runtime/game-event-bus.ts';
 import type { SeatStateStore } from '../seat-display/seat-state-store.ts';
+import { isNationWarMode } from '../seat-display/seat-state.ts';
 import {
   createMingpaiEngine,
   formatZoneId,
@@ -24,6 +25,7 @@ import { traceMingpai } from '../../runtime/mingpai-trace.ts';
 import { resolveSpellOptRepReveals } from './rules/spell-opt-rep-rules.ts';
 import {
   isIgnoredMove,
+  isInitialPileLoad,
   isSameZoneShow,
   isWholeHandMove,
   normalizeMoveCardIds,
@@ -31,7 +33,7 @@ import {
   remapDrawPileToPosition,
   sanitizeMoveCardIds
 } from './rules/move-card-rules.ts';
-import { DRAW_PILE_OWNER } from './rules/reveal-types.ts';
+import { legacyIncomingHandLabel } from './rules/legacy-hand-label.ts';
 import { createSpecialSpellRecovery } from './special-spell-recovery.ts';
 
 type MoveCardEvent = Extract<GameEvent, { type: 'cards-moved' }>;
@@ -296,12 +298,12 @@ export function installMingpaiController(
    */
   function handleCardsMoved(rawEvent: MoveCardEvent): void {
     // 明牌专用纠偏：半透明卡号清空 + 牌堆顶/底纠偏。只影响明牌，不改总线原事件。
-    if (isIgnoredMove(rawEvent)) return;
+    if (isIgnoredMove(rawEvent) || isInitialPileLoad(rawEvent)) return;
     const sanitizedIds = sanitizeMoveCardIds(rawEvent.cardCount, normalizeMoveCardIds(rawEvent));
     const fromPosition = remapDrawPileFromPosition(
       { ...rawEvent, cardIds: sanitizedIds },
       {
-        nationWar: seatStateStore.getSnapshot().mode === 'nation-war',
+        nationWar: isNationWarMode(seatStateStore.getSnapshot().mode),
         cardType
       }
     );
@@ -392,6 +394,19 @@ export function installMingpaiController(
       engine.removeZoneCardIds(MINGPAI_ZONE.UNKNOWN, known);
     }
 
+    const sourceLabel = legacyIncomingHandLabel({
+      spellId: event.spellId,
+      moveType: event.moveType,
+      fromZone: event.fromZone,
+      toZone: event.toZone,
+      toId: event.toId,
+      selfSeatId: seatStateStore.getSnapshot().selfSeatId
+    });
+    if (sourceLabel) {
+      recoveredCardIds.filter((cardId) => cardId > 0).forEach((cardId) => {
+        engine.rememberPersistentCardTag(cardId, sourceLabel);
+      });
+    }
     recoveredCardIds.forEach((cardId) => {
       const persistentTags = engine.getPersistentTags(cardId);
       if (persistentTags.length) seatStateStore.setPersistentKnownCardTags(cardId, persistentTags);
@@ -614,6 +629,10 @@ function recoverKnownCardsAtSource(
   const seat = snapshot.seats.find((entry) => entry.seatId === movement.fromId);
   const knownIds = knownIdsInSourceZone(movement, seat, snapshot.controlledSeatIds.includes(movement.fromId), engine);
   if (!knownIds.length) return [...movement.cardIds];
+  // 手里还有暗牌时，协议没给卡号就不能认定移走的是那张明牌。
+  if (movement.fromZone === HAND_ZONE && (seat?.unknownCardCount ?? 0) > 0) {
+    return [...movement.cardIds];
+  }
   if (knownIds.length === movement.cardCount) return knownIds;
   if (movement.fromZone !== HAND_ZONE || !snapshot.controlledSeatIds.includes(movement.fromId)) {
     return [...movement.cardIds];
@@ -694,9 +713,8 @@ function recoverCardsFromTemporaryZone(
       const [, , , zoneParam] = key.split(':').map(Number);
       return !movement.fromZoneParam || zoneParam === movement.fromZoneParam;
     });
-  return candidates.length === 1
-    ? selectDepartingTemporaryCards(candidates[0][1], movement)
-    : [...movement.cardIds];
+  if (candidates.length === 1) return selectDepartingTemporaryCards(candidates[0][1], movement);
+  return [...movement.cardIds];
 }
 
 /** 技能 3208 从底部取，其余从顶部取，取出后临时区里的顺序跟着缩短。 */

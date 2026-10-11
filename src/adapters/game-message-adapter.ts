@@ -37,12 +37,13 @@ const TARGET_SEAT_ID_KEYS = [
   'DestSeatID', 'DestSeatId'
 ] as const;
 const CARD_ID_KEYS = ['CardID', 'CardId', 'cardID', 'cardId'] as const;
-const CARD_IDS_KEYS = ['CardIDs', 'CardIds', 'cardIDs', 'cardIds', 'Cards'] as const;
+const CARD_IDS_KEYS = ['CardIDs', 'CardIds', 'cardIDs', 'cardIds', 'Cards', 'card_ids', 'card_list', 'CardList'] as const;
 
 /** 一条协议可能对应多个业务事件（SpellOptRep = 看牌 + 临时区重排线索）。未知协议直接忽略。 */
 export function translateGameMessages(rawArguments: unknown[]): GameEvent[] {
-  const payload = findMessagePayload(rawArguments);
-  if (!payload) return [];
+  const rawPayload = findMessagePayload(rawArguments);
+  if (!rawPayload) return [];
+  const payload = protocolBody(rawPayload);
   const className = readString(payload, ['ClassName', 'className']);
   if (!className) return [];
   if (className === 'decodeMsgGameStart' || className === 'MsgGameStart') {
@@ -67,8 +68,7 @@ export function translateGameMessages(rawArguments: unknown[]): GameEvent[] {
       .filter((item): item is GameEvent => item !== null);
   }
   if (className === CARD_LIST_MESSAGE_NAME) {
-    const proto = asRecord(payload.ProtoObj);
-    const list = payload.CardList ?? payload.cardList ?? proto?.CardList ?? proto?.cardList;
+    const list = payload.CardList ?? payload.cardList;
     const cardIds = isArrayLike(list)
       ? Array.from(list, Number).filter((id) => Number.isInteger(id) && id > 0)
       : [];
@@ -96,12 +96,11 @@ function translateSpellDamage(payload: UnknownRecord): GameEvent | null {
 
 function translateFriendHandTags(payload: UnknownRecord): GameEvent | null {
   const protocol = asRecord(payload.Protocol);
-  const data = asRecord(protocol?.Data ?? payload.Data);
-  const proto = asRecord(data?.ProtoObj ?? payload.ProtoObj);
-  const errorId = readNonNegativeInteger(proto ?? {}, ['error_id', 'ErrorID', 'errorId']);
-  if (!proto || (errorId !== 0 && errorId !== 1)) return null;
-  const seatId = readSeatId(proto, ['seat_id', 'SeatID', 'seatId']);
-  const rawIds = proto.card_list ?? proto.CardList ?? proto.cardList;
+  const nested = protocol ? protocolBody(protocol) : payload;
+  const errorId = readNonNegativeInteger(nested, ['error_id', 'ErrorID', 'errorId']);
+  if (errorId !== 0 && errorId !== 1) return null;
+  const seatId = readSeatId(nested, ['seat_id', 'SeatID', 'seatId']);
+  const rawIds = nested.card_list ?? nested.CardList ?? nested.cardList;
   if (seatId === null || !isArrayLike(rawIds)) return null;
   const cardIds = Array.from(rawIds, Number).filter((id) => Number.isInteger(id) && id > 0);
   return { type: 'friend-hand-tags-updated', seatId, cardIds };
@@ -235,33 +234,76 @@ function translateSingleMessage(payload: UnknownRecord, className: string): Game
 }
 
 function translateCardMovement(payload: UnknownRecord): GameEvent | null {
-  const cardCount = readNonNegativeInteger(payload, ['CardCount', 'cardCount']);
-  const moveType = readNonNegativeInteger(payload, ['MoveType', 'moveType']);
-  if (!cardCount || !moveType || payload.isSend === true) return null;
-  const fromZone = readNonNegativeInteger(payload, ['FromZone', 'fromZone']) ?? 0;
-  const toZone = readNonNegativeInteger(payload, ['ToZone', 'toZone']) ?? 0;
+  const body = payload;
+  const cardCount = readNonNegativeInteger(body, ['CardCount', 'cardCount', 'card_count']);
+  const moveType = readNonNegativeInteger(body, ['MoveType', 'moveType', 'move_type']);
+  // MoveType=0 仍可能是有效的牌移动枚举值；有正数牌数且类名为 MoveCard 时即可记录。
+  if (!cardCount || payload.isSend === true || body.isSend === true) return null;
+  const fromZone = readNonNegativeInteger(body, ['FromZone', 'fromZone', 'from_zone']) ?? 0;
+  const toZone = readNonNegativeInteger(body, ['ToZone', 'toZone', 'to_zone']) ?? 0;
   return {
     type: 'cards-moved',
     cardCount,
-    cardIds: readMovementCardIds(payload),
+    cardIds: readMovementCardIds(body),
     fromId: normalizeZoneOwner(
-      readNonNegativeInteger(payload, ['FromID', 'FromId', 'fromID', 'fromId']) ?? 0,
+      readNonNegativeInteger(body, ['FromID', 'FromId', 'fromID', 'fromId', 'from_id']) ?? 0,
       fromZone
     ),
     fromZone,
-    fromPosition: readNonNegativeInteger(payload, ['FromPosition', 'fromPosition']) ?? 0,
-    fromZoneParam: readNonNegativeInteger(payload, ['FromZoneParam', 'fromZoneParam']) ?? 0,
+    fromPosition: readNonNegativeInteger(body, ['FromPosition', 'fromPosition', 'from_position']) ?? 0,
+    fromZoneParam: readNonNegativeInteger(body, ['FromZoneParam', 'fromZoneParam', 'from_zone_param']) ?? 0,
     toId: normalizeZoneOwner(
-      readNonNegativeInteger(payload, ['ToID', 'ToId', 'toID', 'toId']) ?? 0,
+      readNonNegativeInteger(body, ['ToID', 'ToId', 'toID', 'toId', 'to_id']) ?? 0,
       toZone
     ),
     toZone,
-    toPosition: readNonNegativeInteger(payload, ['ToPosition', 'toPosition']) ?? 0,
-    toZoneParam: readNonNegativeInteger(payload, ['ToZoneParam', 'toZoneParam']) ?? 0,
-    moveType,
-    spellId: readNonNegativeInteger(payload, ['SpellID', 'SpellId', 'spellID', 'spellId']) ?? 0,
-    srcSeatId: readSeatId(payload, SRC_SEAT_ID_KEYS)
+    toPosition: readNonNegativeInteger(body, ['ToPosition', 'toPosition', 'to_position']) ?? 0,
+    toZoneParam: readNonNegativeInteger(body, ['ToZoneParam', 'toZoneParam', 'to_zone_param']) ?? 0,
+    moveType: moveType ?? 0,
+    spellId: readNonNegativeInteger(body, ['SpellID', 'SpellId', 'spellID', 'spellId', 'spell_id']) ?? 0,
+    srcSeatId: readSeatId(body, SRC_SEAT_ID_KEYS)
   };
+}
+
+/**
+ * 网页端字段在 ProtoObj / Data，微端在 data.protoObj。
+ * 外层已有的字段优先，避免把已经摊平的协议再盖掉。
+ */
+function protocolBody(payload: UnknownRecord): UnknownRecord {
+  const message = asRecord(payload.msg) ?? asRecord(payload.Msg);
+  const data = asRecord(payload.Data)
+    ?? asRecord(payload.data)
+    ?? asRecord(message?.Data)
+    ?? asRecord(message?.data);
+  const nestedRecords = [
+    asRecord(payload.Protocol),
+    asRecord(payload.protocol),
+    asRecord(payload.ProtoObj),
+    asRecord(payload.protoObj),
+    asRecord(data?.Protocol),
+    asRecord(data?.protocol),
+    asRecord(data?.ProtoObj),
+    asRecord(data?.protoObj),
+    asRecord(message?.Protocol),
+    asRecord(message?.protocol),
+    asRecord(message?.ProtoObj),
+    asRecord(message?.protoObj),
+    data,
+    message
+  ].filter((record): record is UnknownRecord => record !== null && record !== payload);
+  if (!nestedRecords.length) return payload;
+  const merged: UnknownRecord = { ...payload };
+  for (const nested of nestedRecords) {
+    for (const [key, value] of Object.entries(nested)) {
+      // 网页端外层常挂着空 CardIDs，真实牌号在 Protocol / ProtoObj。空列表不能挡住内层。
+      if (merged[key] === undefined || isEmptyList(merged[key])) merged[key] = value;
+    }
+  }
+  return merged;
+}
+
+function isEmptyList(value: unknown): boolean {
+  return isArrayLike(value) && value.length === 0;
 }
 
 /**
@@ -333,8 +375,8 @@ function normalizeZoneOwner(ownerId: number, zone: number): number {
 function readMovementCardIds(payload: UnknownRecord): number[] {
   for (const key of CARD_IDS_KEYS) {
     const value = payload[key];
-    if (!Array.isArray(value)) continue;
-    return value.map((candidate) => {
+    if (!isArrayLike(value)) continue;
+    return Array.from(value, (candidate) => {
       const card = asRecord(candidate);
       return card
         ? readNonNegativeInteger(card, CARD_ID_KEYS) ?? 0

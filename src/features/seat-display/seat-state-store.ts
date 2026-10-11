@@ -393,18 +393,23 @@ function mergeTrackedHands(
         return possibleCards.length ? { ...seat, possibleCards } : seat;
       }
       const knownCardIds = new Set(visibleSceneCards.map((card) => card.cardId));
+      // 手牌已全部公开（排位队友）或张数为 0 时，场景里没有的牌就是已经打出。
+      // 不能再把移动记录里的旧牌补回来，否则牌出完明牌框还在。
+      const trackedExtras = seat.unknownCardCount === 0
+        ? []
+        : (tracked?.cardIds ?? [])
+          .filter((cardId) => !knownCardIds.has(cardId) && !equipmentIds.has(cardId))
+          .slice(0, seat.unknownCardCount);
       const mergedKnownCards = [
         ...visibleSceneCards.map((card) => ({
           ...card,
           tags: [...new Set([...card.tags, ...(persistentTagsByCardId.get(card.cardId) ?? [])])]
         })),
-        ...(tracked?.cardIds ?? [])
-          .filter((cardId) => !knownCardIds.has(cardId) && !equipmentIds.has(cardId))
-          .map((cardId) => ({
-            cardId,
-            name: '',
-            tags: [...(persistentTagsByCardId.get(cardId) ?? [])]
-          }))
+        ...trackedExtras.map((cardId) => ({
+          cardId,
+          name: '',
+          tags: [...(persistentTagsByCardId.get(cardId) ?? [])]
+        }))
       ];
       // 游戏场景提供的总手牌数优先；新增明牌占用原先的未知牌名额。
       const sceneHandCount = seat.knownCards.length + seat.unknownCardCount;

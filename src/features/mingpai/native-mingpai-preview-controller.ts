@@ -17,8 +17,9 @@ import {
   type OfficialCardView
 } from '../cards/official-card-renderer.ts';
 import { locateGameScene } from '../seat-display/game-scene-locator.ts';
+import { readShownHandEntries } from '../seat-display/seat-game-adapter.ts';
 import type { SeatStateStore } from '../seat-display/seat-state-store.ts';
-import type { MingpaiEngine } from './mingpai-engine.ts';
+import { DISCARD_ZONE, DRAW_PILE_ZONE, HAND_ZONE, type MingpaiEngine } from './mingpai-engine.ts';
 import type { GameEventBus } from '../../runtime/game-event-bus.ts';
 
 type UnknownRecord = Record<string, unknown>;
@@ -71,6 +72,8 @@ export function installNativeMingpaiPreviewController(
   let parent: UnknownRecord | null = null;
   let root: UnknownRecord | null = null;
   const strips = new Map<number, SeatStrip>();
+  /** 从 HandShowCards 补进手牌区的牌。离开展示列表时只移走这些。 */
+  const officialShownBySeat = new Map<number, Set<number>>();
   const recommendedBySeat = new Map<number, Set<number>>();
   const selectedBySeat = new Map<number, Set<number>>();
   const markTimers = new Map<number, number>();
@@ -129,6 +132,7 @@ export function installNativeMingpaiPreviewController(
     if (root) destroyNode(root);
     scene = parent = root = null;
     pinnedSeatId = null;
+    officialShownBySeat.clear();
   }
 
   function ensureRoot(): UnknownRecord | null {
@@ -193,6 +197,11 @@ export function installNativeMingpaiPreviewController(
     return entry;
   }
 
+  function equipmentHintText(seatId: number): string {
+    const seat = seatStateStore.getSnapshot().seats.find((entry) => entry.seatId === seatId);
+    return [...new Set((seat?.equipmentCards ?? []).flatMap((card) => card.hints ?? []))].join(' ');
+  }
+
   function renderStrip(
     entry: SeatStrip,
     cardIds: number[],
@@ -204,7 +213,8 @@ export function installNativeMingpaiPreviewController(
       { cardIds, possible: false },
       { cardIds: possibleIds, possible: true }
     ].filter((row) => row.cardIds.length);
-    const signature = `${cardIds.join(',')}|${possibleIds.join(',')}|${JSON.stringify([...tagsByCardId])}`;
+    const hintText = equipmentHintText(entry.seatId);
+    const signature = `${cardIds.join(',')}|${possibleIds.join(',')}|${hintText}|${JSON.stringify([...tagsByCardId])}`;
     if (entry.signature !== signature) {
       readChildren(entry.strip)
         .filter((child) => child !== entry.hit)
@@ -229,6 +239,14 @@ export function installNativeMingpaiPreviewController(
           }
         }
       });
+      if (hintText) {
+        const hint = createText(hintText, 12, '#E6C56A', 'left', true);
+        if (hint) {
+          call(hint, 'pos', 0, rows.length * (TILE_HEIGHT + ROW_GAP));
+          hint.zOrder = 1;
+          call(entry.strip, 'addChild', hint);
+        }
+      }
       call(entry.strip, 'sortChildren');
       entry.signature = signature;
     }
@@ -513,16 +531,13 @@ export function installNativeMingpaiPreviewController(
       }
       if (seat.seatId === snapshot.selfSeatId) continue;
       const anchor = seatUi ? readAnchorRect(seatUi, host) : null;
-      // 引擎位置表是明牌区的权威来源；座位快照负责补上场景直接公开的牌。
-      // 两路合并可避免状态事件与场景轮询短暂不同步时整条已知手牌消失。
-      const engineHandIds = mingpaiEngine?.getHandCardIds(seat.seatId) ?? [];
+      syncShownHandCards(seat.seatId, seatUi, engineSnapshot);
+      // 对照 app.bak 的 shoupai：明牌条只画引擎手牌区，不跟场景里的过期列表互相覆盖。
       const equipmentIds = new Set(
         (seat.equipmentCards ?? []).map((card) => card.cardId).filter((cardId) => cardId > 0)
       );
-      const cardIds = [...new Set([
-        ...seat.knownCards.map((card) => card.cardId),
-        ...engineHandIds
-      ])].filter((cardId) => cardId > 0 && !equipmentIds.has(cardId));
+      const cardIds = (mingpaiEngine?.getHandCardIds(seat.seatId) ?? [])
+        .filter((cardId) => cardId > 0 && !equipmentIds.has(cardId));
       const engineTagsByCardId = new Map((engineSnapshot?.records ?? [])
         .filter((record) => record.persistentTags.length)
         .map((record) => [record.cardId, record.persistentTags] as const));
@@ -679,6 +694,69 @@ export function installNativeMingpaiPreviewController(
       ...readArray(container, ['equipCardUis', 'equipCardUIs']),
       ...readArray(seatUi, ['equipCardUis', 'equipCardUIs'])
     ];
+  }
+
+  /**
+   * 技能展示别人的手牌时，网页端把牌放进 HandShowCards，微端观星写在 HandShowCardIDs。
+   * 移牌协议不一定带卡号。
+   * 这些牌补进手牌区。牌堆上的观星牌、已经进弃牌堆的牌不改位置。离开展示列表时再移出。
+   */
+  function syncShownHandCards(
+    seatId: number,
+    seatUi: UnknownRecord | undefined,
+    engineSnapshot: ReturnType<MingpaiEngine['getSnapshot']> | undefined
+  ): void {
+    if (!mingpaiEngine || !seatUi) return;
+    const seat = asRecord(seatUi.seat);
+    const shown = readShownHandEntries(seat, seatUi);
+    const next = new Set(shown.map(readCardId).filter((cardId) => cardId > 0));
+    const handCount = Number(seat?.handCardCount ?? seat?.HandCardCount ?? seat?.cardCount);
+    const liveHand = new Set(readArray(seat, ['HandCards', 'handCards']).map(readCardId).filter((cardId) => cardId > 0));
+    const equipmentIds = new Set([
+      ...readArray(seatUi, ['equipCardUis', 'equipCardUIs']),
+      ...readArray(asRecord(seatUi.cardContainer), ['equipCardUis', 'equipCardUIs'])
+    ].map(readCardId).filter((cardId) => cardId > 0));
+    // 技能看牌只进 HandShowCards，不进 HandCards。只有两边卡号有交集时，才用实时手牌判断哪张已经离开。
+    if (handCount === 0) next.clear();
+    const liveHandConfirmsMembership = [...next].some((cardId) => liveHand.has(cardId));
+    for (const cardId of [...next]) {
+      if (equipmentIds.has(cardId)) next.delete(cardId);
+      else if (
+        liveHandConfirmsMembership
+        && Number.isFinite(handCount)
+        && liveHand.size === handCount
+        && !liveHand.has(cardId)
+      ) next.delete(cardId);
+    }
+    const onDrawPile = new Set((engineSnapshot?.records ?? [])
+      .filter((record) => record.location?.zone === DRAW_PILE_ZONE)
+      .map((record) => record.cardId));
+    const alreadyDiscarded = new Set((engineSnapshot?.records ?? [])
+      .filter((record) => record.location?.zone === DISCARD_ZONE)
+      .map((record) => record.cardId));
+    const previous = officialShownBySeat.get(seatId) ?? new Set<number>();
+    for (const cardId of next) {
+      if (previous.has(cardId) || onDrawPile.has(cardId) || alreadyDiscarded.has(cardId)) continue;
+      mingpaiEngine.observeKnownHandCard(cardId, seatId, []);
+    }
+    const left = [...previous].filter((cardId) => !next.has(cardId) && !onDrawPile.has(cardId));
+    if (left.length) {
+      mingpaiEngine.applyMovement({
+        cardCount: left.length,
+        cardIds: left,
+        fromId: seatId,
+        fromZone: HAND_ZONE,
+        fromPosition: 0,
+        fromZoneParam: 0,
+        toId: 0,
+        toZone: DISCARD_ZONE,
+        toPosition: 0,
+        toZoneParam: 0
+      }, left);
+    }
+    const kept = new Set([...next].filter((cardId) => !onDrawPile.has(cardId)));
+    if (kept.size) officialShownBySeat.set(seatId, kept);
+    else officialShownBySeat.delete(seatId);
   }
 
   function readHandCardUis(seatUi: UnknownRecord): unknown[] {
@@ -1009,6 +1087,13 @@ function asRecord(value: unknown): UnknownRecord | null {
   return value !== null && (typeof value === 'object' || typeof value === 'function')
     ? value as UnknownRecord
     : null;
+}
+
+function readCardId(card: unknown): number {
+  if (typeof card === 'number') return card;
+  const record = asRecord(card);
+  const inner = asRecord(record?.Card) ?? asRecord(record?.card) ?? asRecord(record?.cardInfo) ?? record;
+  return Number(inner?.CardId ?? inner?.cardId ?? inner?.CardID ?? inner?.cardID ?? 0);
 }
 
 function readArray(record: UnknownRecord | null, keys: readonly string[]): unknown[] {

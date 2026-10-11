@@ -1,72 +1,75 @@
-# 小抄
+# 三国杀小抄
 
-注入三国杀微端的脚本。功能代码在本仓库，运行时挂进游戏页面。
+为三国杀 OL 提供微端脚本和浏览器 userscript。功能代码位于 `src/`，打包时会同时生成两种版本。
 
-小抄版本只看根目录 `package.json` 的 `version`。打包后写进 `xiaochao.js` 的 `@version`，并出现在线上版本接口里。
+## 开发
 
-## 框架
-
-| 目录 | 作用 |
-| --- | --- |
-| `src/entries` | 入口。微端走 `electron.ts`，油猴走 `userscript.ts` |
-| `src/core/bootstrap.ts` | 启动器。组装配置、事件、各功能控制器和 Vue 面板 |
-| `src/features` | 功能。明牌、身份、礼包码、检查更新等都在这里 |
-| `src/ui` | Vue 面板 |
-| `src/adapters` | 平台和游戏对象定位。功能代码不直接依赖微端壳 |
-| `tools/release-app-shell` | 打进安装包的微端壳。业务改动不要写在这里 |
-| `tests` | 用 `node --experimental-strip-types` 跑的测试 |
-
-开发时 `npm run dev` 用仓库里的 Electron 44 加载本目录。已安装的 `SGSOL.exe` 不会加载这个仓库，不能拿来当开发进程。
-
-## 快速上手
-
-```bash
+```powershell
 npm install
-npm run dev
+npm run dev              # 启动本地微端开发环境
+npm run dev:userscript   # 启动浏览器脚本开发服务器
 ```
 
-改 `src` 后，开发进程会按 Vite 的 watch 重新构建脚本。确认某个功能时，在对应的 `tests/*.test.ts` 里补断言：
+主要目录：
 
-```bash
-node --experimental-strip-types tests/某个测试.test.ts
-```
+| 目录 | 用途 |
+| --- | --- |
+| `src/entries` | 微端和浏览器脚本入口 |
+| `src/core` | 启动、配置和功能装配 |
+| `src/features` | 游戏功能 |
+| `src/adapters` | 游戏和平台适配 |
+| `src/ui` | 设置面板 |
+| `tools/release-app-shell` | 随微端安装包发布的壳程序 |
 
-新功能放在 `src/features` 下自己的目录，由 `src/core/bootstrap.ts` 安装。面板放在 `src/ui`。不要把正确性建在 `src/legacy` 上。
+## 版本
+
+- 根目录 `package.json` 的 `version` 是小抄脚本版本。打包后写入脚本 `@version` 和服务端版本清单。
+- `tools/release-app-shell/package.json` 的 `version` 是微端壳版本。只更新脚本功能时不需要修改它。
+- 发布版本必须高于线上 API 清单的版本：<https://95chong.cn/api/xiaochao-version>。
 
 ## 发布
 
-1. 把根目录 `package.json` 的 `version` 改成比线上更高的三段版本，例如 `1.0.12`。小于或等于已安装版本时，客户端不会提示更新。
+1. 将根目录 `package.json` 的 `version` 改为高于线上版本的三段号。
 
-2. 在本仓库执行：
+2. 在本仓库根目录打包并复制门户文件：
 
-```bash
-npm run pack
-npm run copy:portal
-```
+   ```powershell
+   npm run pack
+   npm run copy:portal
+   ```
 
-`npm run pack` 会生成：
+   `pack` 会构建微端脚本和 userscript，生成：
 
-| 文件 | 用途 |
-| --- | --- |
-| `release/wd-xc-<版本>.zip` | 手动安装包。解压后运行里面的 `install.bat` |
-| `release/app.zip` | 自动更新包，文件名不带版本 |
-| `release/xiaochao-manifest.json` | 版本清单 |
-| `dist/userscript/xiaochao.user.js` | 油猴脚本。拷到门户后文件名是 `sgs-xc.user.js` |
+   - `release/wd-xc-<版本>.zip`：微端手动安装包。
+   - `release/app.zip`：微端自动更新包。
+   - `release/xiaochao-manifest.json`：版本、下载地址和 `app.zip` 校验值。
+   - `dist/userscript/xiaochao.user.js`：浏览器 userscript。
 
-打包还会把清单拷到旁边的 `sgs-xc-server/data/xiaochao-manifest.json`。线上接口 `https://95chong.cn/api/xiaochao-version` 读的是服务器上的这份文件。接口进程要在这份文件更新后重新加载，游戏里的「检查更新」才会看到新版本。
+   `copy:portal` 将安装包、清单和 userscript 复制到 `../sgs-xc-portal/public/downloads`。它会先删除该目录里的旧 `.zip` 文件，再放入本版安装包。
 
-3. 发布下载页。`copy:portal` 把安装包、`app.zip`、清单和油猴脚本拷到 `sgs-xc-portal/public/downloads`。油猴脚本在网站上是 `/downloads/sgs-xc.user.js`。然后：
+3. 发布下载文件：
 
-```bash
-cd ../sgs-xc-portal
-npm run deploy
-```
+   ```powershell
+   cd ..\sgs-xc-portal
+   npm run deploy:downloads
+   ```
 
-终端出现「已同步到 admin@123.56.3.130:/opt/xc/dist」后，下载页才是新包。
+   这只同步下载目录。门户页面代码有改动时，才使用门户项目的 `npm run deploy`。
 
-| 地址 | 内容 |
-| --- | --- |
-| `https://xc.95chong.cn/downloads` | 下载页，链接到 `wd-xc-<版本>.zip` |
-| `https://xc.95chong.cn/downloads/app.zip` | 自动更新用的包 |
-| `https://xc.95chong.cn/downloads/sgs-xc.user.js` | 油猴脚本。浏览器打开后由篡改猴安装，版本号升高后会提示更新 |
-| `https://95chong.cn/api/xiaochao-version` | 游戏内检查更新读的版本 |
+4. 更新微端和游戏内“检查更新”读取的 API 清单。在 `../sgs-xc-server` 目录执行：
+
+   ```powershell
+   cd ..\sgs-xc-server
+   scp data/xiaochao-manifest.json admin@123.56.3.130:/opt/sgs-xc-server/data/xiaochao-manifest.json.tmp
+   ssh admin@123.56.3.130 "mv /opt/sgs-xc-server/data/xiaochao-manifest.json.tmp /opt/sgs-xc-server/data/xiaochao-manifest.json"
+   ```
+
+   API 每次请求都会读取清单文件，更新后无需重启服务。
+
+5. 确认以下地址已返回新版本和对应文件：
+
+   - <https://95chong.cn/api/xiaochao-version>：更新检查使用的 API 清单，必须同步。
+   - <https://xc.95chong.cn/downloads/manifest.json>：下载页用它选择版本化的微端安装包。
+   - <https://xc.95chong.cn/downloads/sgs-xc.user.js>：浏览器脚本。
+
+微端启动时通过 API 检查版本；发现新版本后，用户确认并通过 Windows UAC，微端才会替换安装文件。浏览器脚本的检查更新按钮也读取 API 清单；Tampermonkey 根据脚本的 `@updateURL` 更新脚本。

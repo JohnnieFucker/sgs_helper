@@ -141,6 +141,17 @@ export function remapDrawPileToPosition(move: Readonly<MoveCardFields>): number 
   return move.toPosition;
 }
 
+/**
+ * 开局从区外把牌放进牌堆顶（MoveType 19）。
+ * 旧脚本在牌局开始后把这些牌的可见身份写成 0，不能记成牌堆顶明牌。
+ */
+export function isInitialPileLoad(move: Readonly<Pick<MoveCardFields, 'fromZone' | 'toZone' | 'moveType' | 'toPosition'>>): boolean {
+  return move.fromZone === 0
+    && move.toZone === DRAW_PILE_ZONE
+    && move.moveType === 19
+    && (move.toPosition === DRAW_PILE_POSITION.TOP || move.toPosition === DRAW_PILE_POSITION.TOP + 1);
+}
+
 /** 同区同主人的「移动」多数是展示而非真实换位；个别技能例外需真实重排。 */
 const SAME_ZONE_NOT_SHOW = [
   (m: Readonly<MoveCardFields>) => m.spellId === 7011 && m.moveType === 19,

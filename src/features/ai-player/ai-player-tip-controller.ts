@@ -16,10 +16,10 @@ export function installAiPlayerTipController(
   gameEvents: GameEventBus,
   globalObject: GameRuntimeWindow = window
 ): () => void {
-  let rankedTipKey = '';
+  let aiTipKey = '';
   let profileTipId = 0;
   const stopEvents = gameEvents.subscribe((event) => {
-    if (event.type === 'game-started' || event.type === 'game-ended') rankedTipKey = '';
+    if (event.type === 'game-started' || event.type === 'game-ended') aiTipKey = '';
   });
   const timer = globalObject.setInterval(scan, 500);
   scan();
@@ -45,33 +45,35 @@ export function installAiPlayerTipController(
     clearSeatGeneralTips(collectSeatTipTargets(asRecord(scene?.seatContainer)?.seatUIs), 'player-id');
   }
 
-  /** 有人机就提示。真人显示头顶名字，人机关掉。山河图不提示。 */
+  /** 排位和斗地主提示人机；真人的游戏内名字与资料页编号保持可见。 */
   function scanSeats(): void {
     const scene = asRecord(locateGameScene(globalObject));
     if (!scene) {
-      rankedTipKey = '';
+      aiTipKey = '';
       return;
     }
     const seats = readSeatUis(scene)
       .map((seatUi) => ({ seatUi, seat: asRecord(seatUi.seat) }))
       .filter((item) => item.seat && item.seat.isHide !== true);
     for (const { seatUi, seat } of seats) {
-      const info = asRecord(seat?.playerInfo) ?? asRecord(seat?.PlayerInfo);
-      const clientId = info?.ClientId ?? info?.clientId;
+      const clientId = readNestedClientId(seat);
       if (clientId == null || clientId === '') continue;
       const manager = asRecord(seatUi.otherTopManager);
       const showName = typeof manager?.SetPlayNameVisible === 'function' ? manager.SetPlayNameVisible : null;
-      if (showName) showName.call(manager, Number(clientId) < 0xee6b2800);
+      if (showName) showName.call(manager, !isAiClientId(clientId));
     }
-    if (isShanHeTu(scene, globalObject)) return;
+    if (!isAiHintMode(scene, globalObject)) {
+      aiTipKey = '';
+      return;
+    }
     const aiIds = seats
       .map(({ seat }) => seatClientKind(seat))
       .filter((kind) => kind.kind !== 0)
       .map((kind) => kind.id);
     if (!aiIds.length) return;
     const key = aiIds.sort().join(',');
-    if (key === rankedTipKey) return;
-    rankedTipKey = key;
+    if (key === aiTipKey) return;
+    aiTipKey = key;
     showToast('对战AI小杀！', 'warning', 4000);
   }
 
@@ -83,10 +85,12 @@ export function installAiPlayerTipController(
       profileTipId = 0;
       return;
     }
-    const clientId = Number(view.userData && (view.userData as UnknownRecord).ClientId);
+    const rawClientId = readNestedClientId(view.userData);
+    if (rawClientId == null || rawClientId === '') return;
+    const clientId = Number(rawClientId);
     if (!Number.isFinite(clientId)) return;
     const button = asRecord(view.result7Btn);
-    if (button) button.visible = clientId < 0xee6b2800;
+    if (button) button.visible = !isAiClientId(clientId);
     if (!isAiClientId(clientId)) {
       profileTipId = 0;
       return;
@@ -117,10 +121,13 @@ function hookUserInfoView(globalObject: GameRuntimeWindow, tip: (clientId: numbe
   if (!proto || typeof original !== 'function' || original.__xcAiProfileWrapped === true) return;
   const wrapped = function (this: UnknownRecord, ...args: unknown[]) {
     const result = original.apply(this, args);
-    const clientId = Number(this.userData && (this.userData as UnknownRecord).ClientId);
-    if (isAiClientId(clientId)) tip(clientId);
+    const rawClientId = readNestedClientId(this.userData);
+    const clientId = Number(rawClientId);
+    if (rawClientId != null && rawClientId !== '' && isAiClientId(clientId)) tip(clientId);
     const button = asRecord(this.result7Btn);
-    if (button && Number.isFinite(clientId)) button.visible = clientId < 0xee6b2800;
+    if (button && rawClientId != null && rawClientId !== '' && Number.isFinite(clientId)) {
+      button.visible = !isAiClientId(clientId);
+    }
     return result;
   };
   wrapped.__xcAiProfileWrapped = true;
@@ -156,19 +163,40 @@ function findView(node: UnknownRecord, depth: number, allow: () => boolean): Unk
 
 function seatClientKind(seat: UnknownRecord | null): { kind: 0 | 1 | 2; id: string } {
   const info = asRecord(seat?.playerInfo) ?? asRecord(seat?.PlayerInfo);
-  const id = info?.ClientId ?? info?.clientId;
-  return { kind: aiKind(id, info?.IsNormalRobot), id: String(id ?? '') };
+  const id = readNestedClientId(seat);
+  return { kind: aiKind(id, info?.IsNormalRobot ?? info?.isNormalRobot), id: String(id ?? '') };
 }
 
-function isShanHeTu(scene: UnknownRecord, globalObject: GameRuntimeWindow): boolean {
-  const ctor = typeof scene.constructor === 'function' ? scene.constructor.name : '';
-  const name = String(scene.sceneName ?? scene.name ?? ctor);
-  if (name.includes('Rogue') || name.includes('山河')) return true;
-  return readModeLabel(scene, globalObject).includes('山河图');
+function isAiHintMode(scene: UnknownRecord, globalObject: GameRuntimeWindow): boolean {
+  if (scene.isDouDiZhu === true || scene.IsDouDiZhu === true) return true;
+  if ([
+    scene.isRanked,
+    scene.IsRanked,
+    scene.isRank,
+    scene.IsRank,
+    scene.isRankMatch,
+    scene.IsRankMatch,
+    scene.isDuanWei,
+    scene.IsDuanWei,
+    scene.isJingJi,
+    scene.IsJingJi
+  ].some((flag) => flag === true)) return true;
+  return /斗地主|dou\s*di\s*zhu|排位|rank(?:ed|ing)?/i.test(readModeLabel(scene, globalObject));
 }
 
 function readModeLabel(scene: UnknownRecord, globalObject: GameRuntimeWindow): string {
-  const parts: unknown[] = [scene.modeName, scene.ModeName, scene.gameModeName];
+  const roomList = asRecord(scene.roomListView);
+  const areaLabel = asRecord(asRecord(scene.topMenu)?.areaServerLabel)?.text;
+  const parts: unknown[] = [
+    scene.modeName,
+    scene.ModeName,
+    scene.gameModeName,
+    roomList?.modeName,
+    roomList?.modeLabel,
+    roomList?.title,
+    roomList?.nameTxt,
+    areaLabel
+  ];
   const context = asRecord((globalObject as UnknownRecord).GameContext);
   try {
     const vo = typeof context?.GetModeVO === 'function' ? asRecord(context.GetModeVO()) : null;

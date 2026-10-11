@@ -6,8 +6,11 @@ import { FACTION_SLOGANS } from './faction-slogans.ts';
 
 type UnknownRecord = Record<string, unknown>;
 
-/** 势力口号只出现在该聊天频道。 */
-const FACTION_SLOGAN_CHANNEL = 2;
+const CHAT_MESSAGE_NAMES = new Set([
+  'decodeSSCChatmsgNtf',
+  'SSCChatmsgNtf',
+  'SsCChatmsgNtf'
+]);
 
 export interface BlockMessageFilterOptions {
   killEffect: boolean;
@@ -30,12 +33,9 @@ export function applyBlockMessageFilters(
     if (options.killEffect) payload.Type = 0;
     return;
   }
-  if (className === 'decodeSSCChatmsgNtf') {
-    if (options.factionSlogan && isFactionSlogan(payload)) {
-      const data = payload.data;
-      if (data && typeof data === 'object') delete (data as UnknownRecord).protoObj;
-    }
-    return;
+  if (options.factionSlogan && (isChatMessage(className) || containsFactionSlogan(payload))) {
+    if (containsFactionSlogan(payload)) clearChatProto(payload);
+    if (isChatMessage(className)) return;
   }
   if (className === 'ClientGeneralSkinRep' && options.otherSkinState) {
     const list = payload.GeneralSkinList;
@@ -48,10 +48,61 @@ export function applyBlockMessageFilters(
   }
 }
 
-function isFactionSlogan(payload: UnknownRecord): boolean {
-  const chat = payload.ProtoObj;
-  if (!chat || typeof chat !== 'object') return false;
-  const { Channel, channel, chatMsg, ChatMsg } = chat as UnknownRecord;
-  const text = chatMsg || ChatMsg;
-  return (Channel ?? channel) == FACTION_SLOGAN_CHANNEL && typeof text === 'string' && FACTION_SLOGANS.has(text);
+function isChatMessage(className: string): boolean {
+  return CHAT_MESSAGE_NAMES.has(className) || /chatmsg/i.test(className);
+}
+
+function containsFactionSlogan(payload: UnknownRecord): boolean {
+  return chatRecords(payload).some((chat) => sloganText(chat) !== '');
+}
+
+function sloganText(chat: UnknownRecord): string {
+  for (const value of Object.values(chat)) {
+    if (typeof value !== 'string') continue;
+    const text = normalizeChatText(value);
+    if (FACTION_SLOGANS.has(text)) return text;
+  }
+  return '';
+}
+
+function chatRecords(payload: UnknownRecord): UnknownRecord[] {
+  const records: UnknownRecord[] = [];
+  const seen = new Set<UnknownRecord>();
+  const visit = (value: unknown, depth: number) => {
+    if (!value || typeof value !== 'object' || seen.has(value as UnknownRecord) || depth > 3) return;
+    const record = value as UnknownRecord;
+    seen.add(record);
+    records.push(record);
+    if (depth === 3) return;
+    for (const nested of Object.values(record)) visit(nested, depth + 1);
+  };
+  visit(payload, 0);
+  return records;
+}
+
+function normalizeChatText(value: string): string {
+  return value.replace(/<[^>]*>/g, '').replace(/\u0000/g, '').trim();
+}
+
+/** 删掉协议对象，并清掉已经解析出来的口号原文。网页端常从 ProtoObj 直接画。 */
+function clearChatProto(payload: UnknownRecord): void {
+  for (const chat of chatRecords(payload)) {
+    for (const key of ['protoObj', 'ProtoObj', 'proto', 'msg']) {
+      hideProperty(chat, key);
+    }
+    for (const [key, value] of Object.entries(chat)) {
+      if (typeof value !== 'string') continue;
+      if (!FACTION_SLOGANS.has(normalizeChatText(value))) continue;
+      chat[key] = '';
+    }
+  }
+}
+
+function hideProperty(record: UnknownRecord, key: string): void {
+  if (!(key in record)) return;
+  try {
+    Object.defineProperty(record, key, { configurable: true, value: undefined });
+  } catch {
+    try { delete record[key]; } catch { /* 冻结对象上删不掉时，上面的空字符串仍然生效。 */ }
+  }
 }
