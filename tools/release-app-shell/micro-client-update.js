@@ -9,6 +9,10 @@ const { buildWindowsMicroClientUpdater } = require('./micro-client-updater');
 
 const MANIFEST_URL = 'https://95chong.cn/api/xiaochao-version';
 const APP_URL = 'https://xc.95chong.cn/downloads/app.zip';
+const REQUEST_TIMEOUT_MS = 15000;
+const DOWNLOAD_TIMEOUT_MS = 120000;
+const MAX_UPDATE_BYTES = 100 * 1024 * 1024;
+const MAX_REDIRECTS = 5;
 
 function sha256File(filePath) {
     return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
@@ -25,75 +29,89 @@ function compareVersions(left, right) {
     return 0;
 }
 
-function requestBuffer(url, maxBytes) {
+function requestBuffer(url, maxBytes, timeoutMs = REQUEST_TIMEOUT_MS, onProgress, redirectCount = 0) {
     return new Promise((resolve, reject) => {
         const target = new URL(url);
         const client = target.protocol === 'http:' ? http : https;
+        let settled = false;
+        let received = 0;
+        let responseLength = 0;
+        const chunks = [];
+        let timeout;
+        const finish = (error, result) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            if (error) reject(error);
+            else resolve(result);
+        };
         const request = client.get(target, (response) => {
             const statusCode = response.statusCode || 0;
             if (statusCode >= 300 && statusCode < 400 && response.headers.location) {
+                if (redirectCount >= MAX_REDIRECTS) {
+                    response.resume();
+                    finish(new Error('too many redirects while downloading update'));
+                    return;
+                }
                 response.resume();
-                requestBuffer(new URL(response.headers.location, target).toString(), maxBytes).then(resolve, reject);
+                requestBuffer(
+                    new URL(response.headers.location, target).toString(),
+                    maxBytes,
+                    timeoutMs,
+                    onProgress,
+                    redirectCount + 1
+                ).then((result) => finish(null, result), (error) => finish(error));
                 return;
             }
-            const chunks = [];
-            let size = 0;
+            responseLength = Number(response.headers['content-length']);
+            if (maxBytes && Number.isFinite(responseLength) && responseLength > maxBytes) {
+                response.resume();
+                finish(new Error('update response is too large'));
+                return;
+            }
+            if (onProgress) onProgress({ received, total: responseLength });
             response.on('data', (chunk) => {
-                size += chunk.length;
-                if (maxBytes && size > maxBytes) {
-                    request.destroy();
-                    reject(new Error('response is too large'));
+                received += chunk.length;
+                if (maxBytes && received > maxBytes) {
+                    request.destroy(new Error('update response is too large'));
                     return;
                 }
                 chunks.push(chunk);
+                if (onProgress) onProgress({ received, total: responseLength });
             });
             response.on('end', () => {
-                resolve({ statusCode, body: Buffer.concat(chunks) });
+                if (Number.isFinite(responseLength) && received !== responseLength) {
+                    finish(new Error(`incomplete update response (${received}/${responseLength} bytes)`));
+                    return;
+                }
+                finish(null, { statusCode, body: Buffer.concat(chunks) });
             });
+            response.on('aborted', () => finish(new Error('update response was interrupted')));
+            response.on('error', (error) => finish(error));
         });
-        request.on('error', reject);
+        timeout = setTimeout(() => {
+            request.destroy(new Error(`request timed out after ${Math.round(timeoutMs / 1000)} seconds`));
+        }, timeoutMs);
+        request.setTimeout(timeoutMs, () => {
+            request.destroy(new Error(`connection idle for ${Math.round(timeoutMs / 1000)} seconds`));
+        });
+        request.on('error', (error) => finish(error));
     });
 }
 
 /** 检查更新直接请求版本接口，不再用浏览器打开页面再抠正文。 */
-function fetchJson(url) {
-    return new Promise((resolve, reject) => {
-        const target = new URL(url);
-        const client = target.protocol === 'http:' ? http : https;
-        const request = client.get(target, {
-            headers: { Accept: 'application/json' }
-        }, (response) => {
-            const statusCode = response.statusCode || 0;
-            if (statusCode >= 300 && statusCode < 400 && response.headers.location) {
-                response.resume();
-                fetchJson(new URL(response.headers.location, target).toString()).then(resolve, reject);
-                return;
-            }
-            const chunks = [];
-            response.on('data', (chunk) => chunks.push(chunk));
-            response.on('end', () => {
-                const body = Buffer.concat(chunks);
-                if (statusCode !== 200) {
-                    reject(new Error(`Failed to get '${url}' (${statusCode})`));
-                    return;
-                }
-                if (body.length > 1024 * 1024) {
-                    reject(new Error('response is too large'));
-                    return;
-                }
-                try {
-                    resolve(JSON.parse(body.toString('utf8')));
-                } catch (error) {
-                    reject(error);
-                }
-            });
-        });
-        request.on('error', reject);
-    });
+async function fetchJson(url) {
+    const { statusCode, body } = await requestBuffer(url, 1024 * 1024);
+    if (statusCode !== 200) throw new Error(`Failed to get '${url}' (${statusCode})`);
+    try {
+        return JSON.parse(body.toString('utf8'));
+    } catch (error) {
+        throw new Error(`invalid JSON response from '${url}': ${error.message || error}`);
+    }
 }
 
-function downloadFile(url, localFilePath) {
-    return requestBuffer(url).then(({ statusCode, body }) => {
+function downloadFile(url, localFilePath, onProgress) {
+    return requestBuffer(url, MAX_UPDATE_BYTES, DOWNLOAD_TIMEOUT_MS, onProgress).then(({ statusCode, body }) => {
         if (statusCode !== 200) throw new Error(`Failed to get '${url}' (${statusCode})`);
         fs.mkdirSync(path.dirname(localFilePath), { recursive: true });
         fs.writeFileSync(localFilePath, body);
@@ -240,11 +258,22 @@ function scheduleMicroClientUpdate(deps) {
         const updateDirectory = path.join(app.getPath('userData'), 'xiaochao-update');
         const archivePath = path.join(updateDirectory, `app-${manifest.version}.zip`);
         fs.mkdirSync(updateDirectory, { recursive: true });
-        showProgress('正在下载更新，请保持微端运行…\n稍后将自动重启微端');
+        showProgress('正在连接更新服务器…\n请保持微端运行');
         const downloadUrl = new URL(manifest.appUrl);
         downloadUrl.searchParams.set('t', String(Date.now()));
+        let lastProgressAt = 0;
         try {
-            await downloadFile(downloadUrl.toString(), archivePath);
+            await downloadFile(downloadUrl.toString(), archivePath, ({ received, total }) => {
+                const now = Date.now();
+                if (now - lastProgressAt < 250 && (!total || received < total)) return;
+                lastProgressAt = now;
+                if (total > 0) {
+                    const percent = Math.min(100, Math.floor(received / total * 100));
+                    showProgress(`正在下载更新 ${percent}%\n${Math.ceil(received / 1024)} / ${Math.ceil(total / 1024)} KB`);
+                } else {
+                    showProgress(`正在下载更新\n已接收 ${Math.ceil(received / 1024)} KB`);
+                }
+            });
         } catch (error) {
             closeProgress();
             throw error;
