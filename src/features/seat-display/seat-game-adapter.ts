@@ -88,13 +88,17 @@ export function readSeatStateFromGameScene(
     let privateCards = (isControlled ? seatCards : [])
       .flatMap((rawCard) => readKnownCard(rawCard))
       .filter((card) => !equipmentIds.has(card.cardId));
-    const handCardCount = readNonNegativeInteger(seat, HAND_COUNT_KEYS)
-      ?? Math.max(seatCards.length, privateCards.length, shownCards.length);
+    // 浏览器端 HandShowCards / HandShowCardIDs 可能滞后于真实手牌，不能用它的长度
+    // 推算手牌数；优先读游戏计数，其次读座位当前实际渲染的手牌组件数量。
+    const handCardCount = readSeatHandCardCount(seat, seatUI)
+      ?? (isControlled ? privateCards.length : seatCards.length);
     // 手牌张数已是 0 时丢掉残留的私有手牌。观星等公开牌不在手牌张数里，不能一起清掉。
     if (handCardCount === 0) privateCards = [];
     // HandShowCards / HandShowCardIDs 也会短暂残留；手牌总数归零后，
     // 这些条目已不可能仍属于手牌，否则明牌条会在手牌打空后继续显示旧牌。
-    const knownCards = handCardCount === 0 ? [] : [...privateCards, ...shownCards];
+    const knownCards = handCardCount === 0
+      ? []
+      : uniqueCards([...privateCards, ...shownCards]).slice(0, handCardCount);
 
     return [{
       seatId,
@@ -108,7 +112,7 @@ export function readSeatStateFromGameScene(
       anchor: readSeatAnchor(seatUI, gameScene),
       knownCards,
       equipmentCards,
-      unknownCardCount: Math.max(0, handCardCount - privateCards.length)
+      unknownCardCount: Math.max(0, handCardCount - knownCards.length)
     }];
   });
   const selfSeat = seats.find((seat) => seat.isSelf);
@@ -132,6 +136,15 @@ export function readSeatStateFromGameScene(
   };
 }
 
+function uniqueCards(cards: { cardId: number; name: string; tags: string[] }[]): { cardId: number; name: string; tags: string[] }[] {
+  const seen = new Set<number>();
+  return cards.filter((card) => {
+    if (seen.has(card.cardId)) return false;
+    seen.add(card.cardId);
+    return true;
+  });
+}
+
 /**
  * 网页端展示牌在 HandShowCards，HandShowCardIDs 只增不减，有牌面时不再叠卡号。
  * 微端观星写在 HandShowCardIDs，牌面列表经常是空数组，空列表时两边都读卡号。
@@ -150,6 +163,27 @@ export function readShownHandEntries(
     ...readArray(seat, SHOWN_HAND_CARD_ID_KEYS),
     ...readArray(seatUi, SHOWN_HAND_CARD_ID_KEYS)
   ];
+}
+
+/** 返回场景能确认的实际手牌张数；没有可靠来源时返回 null。 */
+export function readSeatHandCardCount(
+  seat: UnknownRecord | null,
+  seatUi: UnknownRecord | null = null
+): number | null {
+  const cardContainer = asRecord(seatUi?.cardContainer);
+  const explicitCount = readNonNegativeInteger(seat, HAND_COUNT_KEYS)
+    ?? readNonNegativeInteger(seatUi, HAND_COUNT_KEYS)
+    ?? readNonNegativeInteger(cardContainer, HAND_COUNT_KEYS);
+  if (explicitCount !== null) return explicitCount;
+
+  // cardUis 是当前座位手牌区正在显示的组件列表，能反映出牌、摸牌后的实际张数。
+  for (const record of [cardContainer, seatUi]) {
+    if (!record) continue;
+    for (const key of CARD_UI_LIST_KEYS) {
+      if (Array.isArray(record[key])) return (record[key] as unknown[]).length;
+    }
+  }
+  return null;
 }
 
 /** 微端注入了 electron 桥；浏览器脚本没有。两边的明牌字段不一样。 */

@@ -103,15 +103,43 @@ export function installExtraAssistController(
   }));
 
   const zuifengUses = createZuifengUses();
+  let activeTurnSeatId: number | null = null;
+  let lastTurnCount = 0;
+  let appliedTurnCount = 0;
   if (options.gameEvents) {
     cleanups.push(options.gameEvents.subscribe((event) => {
       if (event.type === 'game-started' || event.type === 'game-ended') {
         zuifengUses.resetAll();
+        activeTurnSeatId = null;
+        lastTurnCount = 0;
+        appliedTurnCount = 0;
         refreshZuifeng();
         return;
       }
       if (event.type === 'turn-started') {
-        zuifengUses.resetSeat(event.seatId);
+        // MsgGameTurnNtf 常不带 SeatID，只能用来更新回合序号，不能把占位的 0
+        // 当成当前行动座位。实际座位由带真实 SeatID 的回合通知确定。
+        if (event.turnCount > 0) lastTurnCount = event.turnCount;
+        if (event.seatIdKnown === false) return;
+        // 两种协议可能重复描述同一次切换；同座位、同回合号不重置已用次数。
+        const newTurn = activeTurnSeatId !== event.seatId
+          || (lastTurnCount > 0 && lastTurnCount !== appliedTurnCount);
+        if (newTurn) zuifengUses.resetSeat(event.seatId);
+        activeTurnSeatId = event.seatId;
+        if (lastTurnCount > 0) appliedTurnCount = lastTurnCount;
+        refreshZuifeng();
+        return;
+      }
+      if (event.type === 'phase-changed') {
+        // 有些浏览器对局只稳定发送 GsCGamephaseNtf；阶段消息里的座位号是当前行动者。
+        // phase=0 表示新回合开始，后续阶段只更新可见座位，不重置已用次数。
+        if (event.phase === 0) {
+          const newTurn = activeTurnSeatId !== event.seatId
+            || (lastTurnCount > 0 && lastTurnCount !== appliedTurnCount);
+          if (newTurn) zuifengUses.resetSeat(event.seatId);
+          if (lastTurnCount > 0) appliedTurnCount = lastTurnCount;
+        }
+        activeTurnSeatId = event.seatId;
         refreshZuifeng();
         return;
       }
@@ -171,21 +199,8 @@ export function installExtraAssistController(
       getText: (target) => {
         const seat = asRecord(target.seat);
         const seatId = readSeatId(seat);
+        if (seatId === null || seatId !== activeTurnSeatId) return '';
         return formatZuifengTip(seat, skillIds, seatId === null ? 0 : zuifengUses.used(seatId));
-      },
-      style: {
-        fontSize: 16,
-        color: '#FFE14A',
-        stroke: 3,
-        strokeColor: '#1A1004',
-        align: 'center',
-        bold: true,
-        bgColor: '#3A2410',
-        place: (avatar) => {
-          const width = Number(avatar.width) || 90;
-          const height = Number(avatar.height) || 120;
-          return { x: 0, y: Math.max(0, height - 22), width, height: 20 };
-        }
       },
       globalObject
     });

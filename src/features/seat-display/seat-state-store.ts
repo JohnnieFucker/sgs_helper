@@ -120,6 +120,15 @@ export function createSeatStateStore(storage: Storage | null = getSessionStorage
     hasRestoredKnownHands: () => hasRestoredState,
     replace: (candidate) => {
       const nextBaseSnapshot = normalizeSeatState(candidate);
+      // 场景报告手牌为 0 后，不要在下一次摸牌时把旧的跟踪明牌重新合回去。
+      if (nextBaseSnapshot.inGame) {
+        for (const seat of nextBaseSnapshot.seats) {
+          if (seat.isAlive && seat.knownCards.length + seat.unknownCardCount > 0) continue;
+          trackedHands.delete(seat.seatId);
+          trackedOccupants.delete(seat.seatId);
+          suppressedCardsBySeat.delete(seat.seatId);
+        }
+      }
       // 场景消失即视为本局结束，避免缺失 game-ended 消息时把明牌带入下一局。
       if (baseSnapshot.inGame && !nextBaseSnapshot.inGame) {
         clearAllTracking();

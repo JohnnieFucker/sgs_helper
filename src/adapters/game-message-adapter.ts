@@ -162,6 +162,7 @@ function translateSingleMessage(payload: UnknownRecord, className: string): Game
     return {
       type: 'turn-started',
       seatId: seatId ?? 0,
+      seatIdKnown: seatId !== null,
       turnCount: readNonNegativeInteger(payload, [
         'TurnCnt', 'turnCnt', 'Turn', 'turn', 'TurnCount', 'turnCount'
       ]) ?? 0,
@@ -179,6 +180,7 @@ function translateSingleMessage(payload: UnknownRecord, className: string): Game
     return {
       type: 'turn-started',
       seatId,
+      seatIdKnown: true,
       turnCount: 0,
       round: 0
     };

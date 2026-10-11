@@ -20,6 +20,8 @@ export type GameEvent =
   | {
     type: 'turn-started';
     seatId: number;
+    /** false when MsgGameTurnNtf omits SeatID and the adapter uses a placeholder seatId. */
+    seatIdKnown?: boolean;
     /** 协议 TurnCnt；牌局记录用它按回合过滤「本回合弃牌」。 */
     turnCount: number;
     round: number;
@@ -313,6 +315,7 @@ function normalizeGameEvent(event: GameEvent): Readonly<GameEvent> | null {
     return Object.freeze({
       type: event.type,
       seatId,
+      seatIdKnown: event.seatIdKnown !== false,
       turnCount: normalizeNonNegativeInteger(event.turnCount) ?? 0,
       round: normalizeNonNegativeInteger(event.round) ?? 0
     });

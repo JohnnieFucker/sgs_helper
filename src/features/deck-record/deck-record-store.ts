@@ -42,6 +42,8 @@ export interface DeckRecordSnapshot {
 /** 牌堆有序已知牌的权威来源（明牌引擎），包含观星 / 知天等看牌结果。 */
 export interface DrawPileOrderSource {
   getDrawPile(): Readonly<{ top: readonly number[]; bottom: readonly number[] }>;
+  /** 明牌引擎当前确认位于弃牌区的卡号；用于补齐浏览器端未携带 CardIDs 的移牌消息。 */
+  getKnownDiscardCardIds?(): readonly number[];
   subscribe(listener: () => void): () => void;
 }
 
@@ -78,6 +80,7 @@ export function createDeckRecordStore(
   let round = 0;
   let taggedCurrentTurnDiscards: TurnTaggedCard[] = [];
   let currentTurnHiddenDiscardCount = 0;
+  let observedKnownDiscardIds = new Set(drawPileSource?.getKnownDiscardCardIds?.() ?? []);
   let snapshot = freezeSnapshot(
     restoredSnapshot
       ? {
@@ -145,6 +148,7 @@ export function createDeckRecordStore(
       turnCount = 0;
       round = 0;
       clearCurrentTurnDiscards();
+      observedKnownDiscardIds = new Set(drawPileSource?.getKnownDiscardCardIds?.() ?? []);
       snapshot = freezeSnapshot(createEmptySnapshot());
       persistSnapshot(storage, snapshot);
       listeners.forEach((listener) => listener(snapshot));
@@ -166,6 +170,17 @@ export function createDeckRecordStore(
     }
     if (event.type !== 'cards-moved') return;
     const movement = createMovementRecord(++sequence, event);
+    // mingpai 先处理同一条游戏事件；此处引擎已反映移动后的已知弃牌区。
+    // 网页端部分协议省略 CardIDs，因此用前后差集恢复这次公开进/出弃牌区的牌。
+    const currentKnownDiscardIds = new Set(
+      (drawPileSource?.getKnownDiscardCardIds?.() ?? []).filter((cardId) => cardId > 0)
+    );
+    const newlyKnownDiscardIds = [...currentKnownDiscardIds]
+      .filter((cardId) => !observedKnownDiscardIds.has(cardId));
+    const removedKnownDiscardIds = [...observedKnownDiscardIds]
+      .filter((cardId) => !currentKnownDiscardIds.has(cardId));
+    observedKnownDiscardIds = currentKnownDiscardIds;
+    const movedCardIds = [...new Set(event.cardIds.filter((cardId) => cardId > 0))];
     const discardCardIds = [...snapshot.discardCardIds];
     let hiddenDiscardCount = snapshot.hiddenDiscardCount;
     const deckTopCardIds = [...snapshot.deckTopCardIds];
@@ -184,14 +199,15 @@ export function createDeckRecordStore(
     // Zone=2 是全局弃牌堆。浏览器协议有时把公共区 owner 留为操作者座位，
     // 所以移出弃牌区时只按 zone 判断，不能要求 owner 必须是 0xff。
     if (event.fromZone === DISCARD_ZONE) {
-      const removedKnownCount = removeKnownCards(discardCardIds, event.cardIds);
+      const leavingKnownIds = [...new Set([...movedCardIds, ...removedKnownDiscardIds])];
+      const removedKnownCount = removeKnownCards(discardCardIds, leavingKnownIds);
       hiddenDiscardCount = Math.max(
         0,
         hiddenDiscardCount - Math.max(0, event.cardCount - removedKnownCount)
       );
       const removedCurrentTurnKnownCount = removeTaggedCards(
         taggedCurrentTurnDiscards,
-        event.cardIds,
+        leavingKnownIds,
         turnCount,
         round
       );
@@ -201,8 +217,10 @@ export function createDeckRecordStore(
       );
     }
     if (event.toZone === DISCARD_ZONE) {
-      const knownCardIds = event.cardIds.filter((cardId) => cardId > 0);
-      discardCardIds.push(...knownCardIds);
+      const knownCardIds = [...new Set([...movedCardIds, ...newlyKnownDiscardIds])];
+      for (const cardId of knownCardIds) {
+        if (!discardCardIds.includes(cardId)) discardCardIds.push(cardId);
+      }
       hiddenDiscardCount += Math.max(0, event.cardCount - knownCardIds.length);
       for (const cardId of knownCardIds) {
         taggedCurrentTurnDiscards.push({ cardId, turnCount, round });

@@ -75,10 +75,6 @@ export function bootstrapXiaochao(platform: PlatformAdapter): void {
     configStore.get('display.recentCardMode')
   );
   const mingpaiEngine = createMingpaiEngine();
-  const deckRecordStore = createDeckRecordStore(gameEvents, undefined, {
-    getDrawPile: () => mingpaiEngine.getSnapshot().drawPile,
-    subscribe: (listener) => mingpaiEngine.subscribe(listener)
-  });
   const deckRecordInteraction = createDeckRecordInteraction();
   const mingpaiRuntime = installMingpaiController(seatStateStore, gameEvents, {
     engine: mingpaiEngine,
@@ -87,6 +83,15 @@ export function bootstrapXiaochao(platform: PlatformAdapter): void {
       return card?.suit ? card.isRed : null;
     },
     cardType: (cardId) => gameCardCatalog.resolve(cardId).cardType
+  });
+  // 明牌控制器先订阅游戏事件，牌局记录随后读取引擎更新后的弃牌区差异，
+  // 以补齐浏览器端移牌协议里偶尔缺失的 CardIDs。
+  const deckRecordStore = createDeckRecordStore(gameEvents, undefined, {
+    getDrawPile: () => mingpaiEngine.getSnapshot().drawPile,
+    getKnownDiscardCardIds: () => mingpaiEngine.getSnapshot().records
+      .filter((record) => record.location?.zone === 2)
+      .map((record) => record.cardId),
+    subscribe: (listener) => mingpaiEngine.subscribe(listener)
   });
   registerSpellNameLookup((name) => cardConfigSource.findSpellIdsByName(name));
   const skillAssistStore = createSkillAssistStore(

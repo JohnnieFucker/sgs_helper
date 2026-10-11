@@ -17,7 +17,7 @@ import {
   type OfficialCardView
 } from '../cards/official-card-renderer.ts';
 import { locateGameScene } from '../seat-display/game-scene-locator.ts';
-import { readShownHandEntries } from '../seat-display/seat-game-adapter.ts';
+import { readSeatHandCardCount, readShownHandEntries } from '../seat-display/seat-game-adapter.ts';
 import type { SeatStateStore } from '../seat-display/seat-state-store.ts';
 import { DISCARD_ZONE, DRAW_PILE_ZONE, HAND_ZONE, type MingpaiEngine } from './mingpai-engine.ts';
 import type { GameEventBus } from '../../runtime/game-event-bus.ts';
@@ -541,8 +541,9 @@ export function installNativeMingpaiPreviewController(
       const equipmentIds = new Set(
         (seat.equipmentCards ?? []).map((card) => card.cardId).filter((cardId) => cardId > 0)
       );
+      const currentKnownIds = new Set(seat.knownCards.map((card) => card.cardId));
       const cardIds = (mingpaiEngine?.getHandCardIds(seat.seatId) ?? [])
-        .filter((cardId) => cardId > 0 && !equipmentIds.has(cardId));
+        .filter((cardId) => cardId > 0 && currentKnownIds.has(cardId) && !equipmentIds.has(cardId));
       const engineTagsByCardId = new Map((engineSnapshot?.records ?? [])
         .filter((record) => record.persistentTags.length)
         .map((record) => [record.cardId, record.persistentTags] as const));
@@ -715,7 +716,7 @@ export function installNativeMingpaiPreviewController(
     const seat = asRecord(seatUi.seat);
     const shown = readShownHandEntries(seat, seatUi);
     const next = new Set(shown.map(readCardId).filter((cardId) => cardId > 0));
-    const handCount = Number(seat?.handCardCount ?? seat?.HandCardCount ?? seat?.cardCount);
+    const handCount = readSeatHandCardCount(seat, seatUi) ?? Number.NaN;
     const liveHand = new Set(readArray(seat, ['HandCards', 'handCards']).map(readCardId).filter((cardId) => cardId > 0));
     const equipmentIds = new Set([
       ...readArray(seatUi, ['equipCardUis', 'equipCardUIs']),
@@ -723,6 +724,12 @@ export function installNativeMingpaiPreviewController(
     ].map(readCardId).filter((cardId) => cardId > 0));
     // 技能看牌只进 HandShowCards，不进 HandCards。只有两边卡号有交集时，才用实时手牌判断哪张已经离开。
     if (handCount === 0) next.clear();
+    else if (Number.isInteger(handCount) && handCount > 0 && next.size > handCount) {
+      // 展示列表可能残留上一状态的卡号；不能让它把明牌条撑到实际手牌数以上。
+      const current = [...next].slice(0, handCount);
+      next.clear();
+      current.forEach((cardId) => next.add(cardId));
+    }
     const liveHandConfirmsMembership = [...next].some((cardId) => liveHand.has(cardId));
     for (const cardId of [...next]) {
       if (equipmentIds.has(cardId)) next.delete(cardId);

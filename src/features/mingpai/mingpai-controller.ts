@@ -94,6 +94,12 @@ export function installMingpaiController(
     synchronizingPersistentTags = true;
     try {
       snapshot.seats.forEach((seat) => {
+        // 浏览器端可能先把场景手牌列表清空，再送达或省略移牌卡号。
+        // 手牌数明确为 0 时，清除引擎仍挂在该座位手牌区的旧明牌，避免牌条残留。
+        if (!seat.isAlive || seat.knownCards.length + seat.unknownCardCount === 0) {
+          engine.clearKnownHandCards(seat.seatId);
+          return;
+        }
         const equipmentIds = new Set(
           (seat.equipmentCards ?? []).map((card) => card.cardId).filter((cardId) => cardId > 0)
         );

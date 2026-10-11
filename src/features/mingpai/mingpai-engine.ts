@@ -51,6 +51,8 @@ export interface MingpaiEngine {
   findKZ(cardIdOrNode: number): MingpaiFindResult;
   /** 手牌区已知牌 ID。 */
   getHandCardIds(seatId: number): readonly number[];
+  /** 手牌已确定为空时，清除引擎里仍留在该座位手牌区的过期牌号。 */
+  clearKnownHandCards(seatId: number): void;
   /** 牌堆区（zone=1）已知牌 ID。 */
   getDrawPileCardIds(): readonly number[];
   clearKnownDrawPileOrder(): void;
@@ -255,6 +257,17 @@ export function createMingpaiEngine(
     },
     getHandCardIds(seatId) {
       return snapshot.zones[formatZoneId(seatId, HAND_ZONE)] ?? EMPTY;
+    },
+    clearKnownHandCards(seatId) {
+      let changed = false;
+      for (const record of cardIndex.values()) {
+        if (record.location?.seatId !== seatId || record.location.zone !== HAND_ZONE) continue;
+        record.location = null;
+        changed = true;
+      }
+      if (!changed) return;
+      registry.clearLocations(seatId, HAND_ZONE);
+      publish();
     },
     getDrawPileCardIds() {
       return snapshot.zones[formatZoneId(GLOBAL_OWNER, DRAW_PILE_ZONE)] ?? EMPTY;
