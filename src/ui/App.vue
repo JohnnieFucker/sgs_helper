@@ -78,9 +78,9 @@ const props = defineProps<{
   rogueController: RogueController | null;
   updateNoticeController: UpdateNoticeController | null;
 }>();
-/** 折叠态做成近 3:1 胶囊：两行叠阶段/出杀，避免扁长条。 */
+/** 折叠态沿用 app.bak 的单行状态胶囊。 */
 const COLLAPSED_PANEL_HEIGHT = '48px';
-const COLLAPSED_PANEL_WIDTH = '148px';
+const COLLAPSED_PANEL_WIDTH = '120px';
 const savedTabId = props.configStore.get('panel.activeTab');
 const initialTabId: XiaochaoPanelTabId = XIAOCHAO_PANEL_TABS.some((tab) => tab.id === savedTabId)
   ? savedTabId
@@ -92,6 +92,8 @@ const panel = createXiaochaoPanelModel(
   initialCollapsed,
   persistCollapsedState
 );
+// 根级 ref 直接驱动模板与标题栏，折叠切换时同步更新状态文案。
+const isCollapsed = panel.isCollapsed;
 const panelElement = ref<HTMLElement>();
 const isDockedRight = ref(props.configStore.get('panel.dockedRight'));
 const isDockPreviewVisible = ref(false);
@@ -406,29 +408,29 @@ function handleResizeStart(event: PointerEvent): void {
     id="createIframe"
     class="createIframe xiaochao-panel"
     :class="{
-      'xiaochao-panel--collapsed': panel.isCollapsed.value,
+      'xiaochao-panel--collapsed': isCollapsed,
       'xiaochao-panel--docked-right': isDockedRight
     }"
     aria-label="三国杀小抄"
   >
     <PanelHeader
-      :collapsed="panel.isCollapsed.value"
+      :collapsed="isCollapsed"
       @toggle="toggleCollapsed"
       @drag-start="handleDragStart"
     >
       <TurnStatusBar
         :turn-status-store="turnStatusStore"
-        :compact="panel.isCollapsed.value"
+        :compact="isCollapsed"
       />
     </PanelHeader>
     <PanelTabs
-      v-show="!panel.isCollapsed.value"
+      v-show="!isCollapsed"
       :active-tab-id="panel.activeTabId.value"
       :tools-has-update="toolsHasUpdate"
       @select="panel.selectTab"
     />
     <main
-      v-show="!panel.isCollapsed.value && panel.activeTabId.value === 'cards'"
+      v-show="!isCollapsed && panel.activeTabId.value === 'cards'"
       class="xiaochao-panel__content xiaochao-cards-pane"
     >
       <SkillAssistSection
@@ -450,7 +452,7 @@ function handleResizeStart(event: PointerEvent): void {
       </div>
     </main>
     <main
-      v-show="!panel.isCollapsed.value && panel.activeTabId.value === 'rogue'"
+      v-show="!isCollapsed && panel.activeTabId.value === 'rogue'"
       class="xiaochao-panel__content xiaochao-rogue-entry"
     >
       <RogueSettingsSection
@@ -461,7 +463,7 @@ function handleResizeStart(event: PointerEvent): void {
       />
     </main>
     <main
-      v-show="!panel.isCollapsed.value && panel.activeTabId.value === 'tools'"
+      v-show="!isCollapsed && panel.activeTabId.value === 'tools'"
       class="xiaochao-panel__content xiaochao-tools-entry"
     >
       <VersionNoticeSection :update-notice-controller="updateNoticeController" />
@@ -490,10 +492,10 @@ function handleResizeStart(event: PointerEvent): void {
     <main
       id="iframe-source"
       class="xiaochao-panel__content"
-      :style="{ display: panel.isCollapsed.value || panel.activeTabId.value === 'cards' || panel.activeTabId.value === 'tools' || panel.activeTabId.value === 'rogue' ? 'none' : '' }"
+      :style="{ display: isCollapsed || panel.activeTabId.value === 'cards' || panel.activeTabId.value === 'tools' || panel.activeTabId.value === 'rogue' ? 'none' : '' }"
     />
     <div
-      v-show="!panel.isCollapsed.value"
+      v-show="!isCollapsed"
       id="frame-resize-handle"
       data-tooltip="拖动调整高度"
       @pointerdown.stop="handleResizeStart"
@@ -504,7 +506,9 @@ function handleResizeStart(event: PointerEvent): void {
     class="xiaochao-dock-preview"
     :class="{ 'xiaochao-dock-preview--active': isDockPreviewActive }"
     aria-hidden="true"
-  />
+  >
+    <span>拖到这里固定</span>
+  </div>
   <TooltipLayer />
   <BaseDialog
     :open="isResetDialogOpen"

@@ -32,6 +32,8 @@ export function installNativeRecentCardController(
   let label: UnknownRecord | null = null;
   let hitArea: UnknownRecord | null = null;
   let displayedCardId = 0;
+  let lastLayoutSignature = '';
+  let lastModeText = '';
 
   const clearCard = () => {
     if (!cardView) return;
@@ -44,6 +46,8 @@ export function installNativeRecentCardController(
     clearCard();
     try { call(root, 'removeSelf'); call(root, 'destroy', true); } catch { /* 已随场景销毁 */ }
     scene = parent = root = placeholder = label = hitArea = null;
+    lastLayoutSignature = '';
+    lastModeText = '';
   };
 
   const sync = () => {
@@ -79,18 +83,27 @@ export function installNativeRecentCardController(
     const scale = Math.max(.5, Math.min(.68, totalHeight / 130));
     const width = Math.ceil(93 * scale);
     const height = Math.ceil(130 * scale);
+    const x = Number(roundInfo.x || 0) - width - 5;
+    const y = Number(roundInfo.y || 0);
+    const modeText = snapshot.displayMode === 'current' ? '当前' : '玩家';
     root.visible = enabled;
-    call(root, 'pos', Number(roundInfo.x || 0) - width - 5, Number(roundInfo.y || 0));
-    call(root, 'size', width, height);
+    const layoutSignature = `${x}:${y}:${width}:${height}`;
+    if (lastLayoutSignature !== layoutSignature) {
+      call(root, 'pos', x, y);
+      call(root, 'size', width, height);
+      lastLayoutSignature = layoutSignature;
+    }
 
     if (displayedCardId !== cardId) {
       clearCard();
       if (cardId > 0) cardView = createOfficialCardView(root, cardId, width, height, nextScene);
       displayedCardId = cardView ? cardId : 0;
     }
-    const modeText = snapshot.displayMode === 'current' ? '当前' : '玩家';
-    placeholder = updatePlaceholder(root, placeholder, `${modeText}\n用牌`, width, height);
-    label = updateModeLabel(root, label, modeText, width, height);
+    if (lastModeText !== modeText || !placeholder || !label) {
+      placeholder = updatePlaceholder(root, placeholder, `${modeText}\n用牌`, width, height);
+      label = updateModeLabel(root, label, modeText, width, height);
+      lastModeText = modeText;
+    }
     hitArea = updateHitArea(root, hitArea, width, height, () => {
       const nextMode = recentCardStore.getSnapshot().displayMode === 'current' ? 'player' : 'current';
       recentCardStore.setDisplayMode(nextMode);

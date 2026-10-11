@@ -24,6 +24,8 @@ export interface SpecialSpellRecoveryContext {
   isControlledSeat(seatId: number): boolean;
   /** 红色 true，黑色 false，配置未就绪 null。 */
   isRedCard(cardId: number): boolean | null;
+  /** 动态解析游戏版本中的椒遇技能 ID。 */
+  isJiaoyuSpell?(spellId: number): boolean;
 }
 
 export interface SpecialSpellRecovery {
@@ -81,6 +83,8 @@ export function createSpecialSpellRecovery(ctx: SpecialSpellRecoveryContext): Sp
   const spell3571ColorBySeat = new Map<number, number>();
   const spell3571StateColorBySeat = new Map<number, number>();
   const spell3571JudgmentsBySeat = new Map<number, number[]>();
+  const jiaoyuColorBySeat = new Map<number, number>();
+  const jiaoyuJudgmentsBySeat = new Map<number, number[]>();
   let spell780Given: number | null = null;
 
   function observe(event: Readonly<GameEvent>): void {
@@ -99,6 +103,16 @@ export function createSpecialSpellRecovery(ctx: SpecialSpellRecoveryContext): Sp
     if (event.type === 'spell-data-updated' && event.dataId === SPELL_3571) {
       const color = event.datas[0];
       if (color === COLOR_RED || color === COLOR_BLACK) spell3571ColorBySeat.set(event.seatId, color);
+      return;
+    }
+    if (event.type === 'spell-data-updated' && ctx.isJiaoyuSpell?.(event.dataId)) {
+      const color = event.datas[0];
+      if (color === COLOR_RED || color === COLOR_BLACK) jiaoyuColorBySeat.set(event.seatId, color);
+      return;
+    }
+    if (event.type === 'seat-state-changed' && ctx.isJiaoyuSpell?.(event.stateId)) {
+      const color = Math.trunc(event.value / 100);
+      if (color === COLOR_RED || color === COLOR_BLACK) jiaoyuColorBySeat.set(event.seatId, color);
       return;
     }
     if (event.type === 'spell-opt-rep') {
@@ -140,6 +154,7 @@ export function createSpecialSpellRecovery(ctx: SpecialSpellRecoveryContext): Sp
     if (event.spellId === SPELL_3571 && event.effectIndex === 1) {
       spell3571JudgmentsBySeat.set(event.seatId, []);
     }
+    if (ctx.isJiaoyuSpell?.(event.spellId)) jiaoyuJudgmentsBySeat.set(event.seatId, []);
   }
 
   function recover(move: Readonly<MoveCardEvent>): number[] | null {
@@ -227,6 +242,18 @@ export function createSpecialSpellRecovery(ctx: SpecialSpellRecoveryContext): Sp
       return recovered;
     }
 
+    if (ctx.isJiaoyuSpell?.(move.spellId) && move.fromZone === JUDGE_SHOW && move.toZone === HAND) {
+      const color = jiaoyuColorBySeat.get(move.toId);
+      const judgments = jiaoyuJudgmentsBySeat.get(move.toId);
+      jiaoyuJudgmentsBySeat.delete(move.toId);
+      if (!hidden || (color !== COLOR_RED && color !== COLOR_BLACK) || !judgments?.length) return null;
+      const inZone = new Set(ctx.zoneCardIds(move.fromId, JUDGE_SHOW));
+      const selected = judgments.filter((cardId) => (
+        inZone.has(cardId) && ctx.isRedCard(cardId) === (color === COLOR_RED)
+      ));
+      return exactly(selected, count);
+    }
+
     if (
       move.spellId === SPELL_780 && hidden && move.fromZone === HAND && move.toZone === DRAW_PILE
       && move.fromPosition === DRAW_PILE_POSITION.UNSPECIFIED && count === 1
@@ -282,6 +309,14 @@ export function createSpecialSpellRecovery(ctx: SpecialSpellRecoveryContext): Sp
       spell3571JudgmentsBySeat.set(move.srcSeatId, [...new Set([...previous, ...known])]);
     }
     if (
+      ctx.isJiaoyuSpell?.(move.spellId) && move.fromZone === PROCESSING && move.toZone === JUDGE_SHOW
+      && known.length === move.cardCount
+    ) {
+      const ownerSeatId = move.srcSeatId ?? move.toId;
+      const previous = jiaoyuJudgmentsBySeat.get(ownerSeatId) ?? [];
+      jiaoyuJudgmentsBySeat.set(ownerSeatId, [...new Set([...previous, ...known])]);
+    }
+    if (
       move.spellId === SPELL_780 && move.fromZone === HAND && move.toZone === HAND
       && move.fromPosition === DRAW_PILE_POSITION.UNSPECIFIED && move.cardCount === 1
       && move.fromId === currentSeatId
@@ -302,6 +337,8 @@ export function createSpecialSpellRecovery(ctx: SpecialSpellRecoveryContext): Sp
     spell3571ColorBySeat.clear();
     spell3571StateColorBySeat.clear();
     spell3571JudgmentsBySeat.clear();
+    jiaoyuColorBySeat.clear();
+    jiaoyuJudgmentsBySeat.clear();
     spell780Given = null;
   }
 

@@ -18,18 +18,28 @@ export function isAiClientId(clientId: unknown): boolean {
   return aiKind(clientId, false) !== 0;
 }
 
-const CLIENT_ID_KEYS = ['ClientId', 'clientId', 'ClientID'] as const;
+const CLIENT_ID_KEYS = [
+  'ClientId', 'clientId', 'ClientID', 'clientID', 'client_id', 'clientid'
+] as const;
 
 /** 只读 ClientId。旁边的小编号不能拿来判断人机。 */
 export function readNestedClientId(value: unknown): unknown {
   const record = asRecord(value);
   if (!record) return null;
-  const bags = [
-    record,
-    asRecord(record.userData),
-    asRecord(record.playerInfo),
-    asRecord(record.PlayerInfo)
-  ].filter((bag): bag is Record<string, unknown> => bag !== null);
+  const bags: Record<string, unknown>[] = [];
+  const queue: { value: Record<string, unknown>; depth: number }[] = [{ value: record, depth: 0 }];
+  const seen = new Set<Record<string, unknown>>();
+  while (queue.length) {
+    const current = queue.shift()!;
+    if (seen.has(current.value)) continue;
+    seen.add(current.value);
+    bags.push(current.value);
+    if (current.depth >= 2) continue;
+    for (const key of ['userData', 'UserData', 'userInfo', 'UserInfo', 'playerInfo', 'PlayerInfo', 'player', 'Player']) {
+      const nested = asRecord(current.value[key]);
+      if (nested) queue.push({ value: nested, depth: current.depth + 1 });
+    }
+  }
   for (const key of CLIENT_ID_KEYS) {
     for (const bag of bags) {
       const id = bag[key];

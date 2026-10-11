@@ -529,7 +529,12 @@ export function installNativeMingpaiPreviewController(
         refreshNativeCardTags(equipUis, ['心幽'], true);
         refreshNativeCardTags(handUis, ['心幽'], true);
       }
-      if (seat.seatId === snapshot.selfSeatId) continue;
+      if (seat.seatId === snapshot.selfSeatId) {
+        // 本机手牌仍由游戏原生组件承载选牌/技能交互，不能隐藏它。
+        const existing = strips.get(seat.seatId);
+        if (existing?.nativeSprite) restoreNativeSprite(existing);
+        continue;
+      }
       const anchor = seatUi ? readAnchorRect(seatUi, host) : null;
       syncShownHandCards(seat.seatId, seatUi, engineSnapshot);
       // 对照 app.bak 的 shoupai：明牌条只画引擎手牌区，不跟场景里的过期列表互相覆盖。
@@ -734,12 +739,18 @@ export function installNativeMingpaiPreviewController(
     const alreadyDiscarded = new Set((engineSnapshot?.records ?? [])
       .filter((record) => record.location?.zone === DISCARD_ZONE)
       .map((record) => record.cardId));
+    const ownedByAnotherSeat = (cardId: number) => {
+      const location = engineSnapshot?.records.find((record) => record.cardId === cardId)?.location;
+      return location?.zone === HAND_ZONE && location.seatId !== seatId;
+    };
     const previous = officialShownBySeat.get(seatId) ?? new Set<number>();
     for (const cardId of next) {
-      if (previous.has(cardId) || onDrawPile.has(cardId) || alreadyDiscarded.has(cardId)) continue;
+      if (previous.has(cardId) || onDrawPile.has(cardId) || alreadyDiscarded.has(cardId) || ownedByAnotherSeat(cardId)) continue;
       mingpaiEngine.observeKnownHandCard(cardId, seatId, []);
     }
-    const left = [...previous].filter((cardId) => !next.has(cardId) && !onDrawPile.has(cardId));
+    const left = [...previous].filter((cardId) => (
+      !next.has(cardId) && !onDrawPile.has(cardId) && !ownedByAnotherSeat(cardId)
+    ));
     if (left.length) {
       mingpaiEngine.applyMovement({
         cardCount: left.length,
@@ -754,7 +765,7 @@ export function installNativeMingpaiPreviewController(
         toZoneParam: 0
       }, left);
     }
-    const kept = new Set([...next].filter((cardId) => !onDrawPile.has(cardId)));
+    const kept = new Set([...next].filter((cardId) => !onDrawPile.has(cardId) && !ownedByAnotherSeat(cardId)));
     if (kept.size) officialShownBySeat.set(seatId, kept);
     else officialShownBySeat.delete(seatId);
   }

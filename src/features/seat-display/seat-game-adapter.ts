@@ -89,10 +89,12 @@ export function readSeatStateFromGameScene(
       .flatMap((rawCard) => readKnownCard(rawCard))
       .filter((card) => !equipmentIds.has(card.cardId));
     const handCardCount = readNonNegativeInteger(seat, HAND_COUNT_KEYS)
-      ?? Math.max(seatCards.length, privateCards.length);
+      ?? Math.max(seatCards.length, privateCards.length, shownCards.length);
     // 手牌张数已是 0 时丢掉残留的私有手牌。观星等公开牌不在手牌张数里，不能一起清掉。
     if (handCardCount === 0) privateCards = [];
-    const knownCards = [...privateCards, ...shownCards];
+    // HandShowCards / HandShowCardIDs 也会短暂残留；手牌总数归零后，
+    // 这些条目已不可能仍属于手牌，否则明牌条会在手牌打空后继续显示旧牌。
+    const knownCards = handCardCount === 0 ? [] : [...privateCards, ...shownCards];
 
     return [{
       seatId,

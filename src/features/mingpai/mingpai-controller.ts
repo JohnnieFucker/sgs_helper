@@ -35,6 +35,7 @@ import {
 } from './rules/move-card-rules.ts';
 import { legacyIncomingHandLabel } from './rules/legacy-hand-label.ts';
 import { createSpecialSpellRecovery } from './special-spell-recovery.ts';
+import { DRAW_PILE_OWNER } from './rules/reveal-types.ts';
 
 type MoveCardEvent = Extract<GameEvent, { type: 'cards-moved' }>;
 
@@ -67,7 +68,8 @@ export function installMingpaiController(
     },
     zoneCardIds: (seatId, zone) => engine.getZoneCardIds(formatZoneId(seatId, zone)),
     isControlledSeat: (seatId) => isControlledSeat(seatId),
-    isRedCard
+    isRedCard,
+    isJiaoyuSpell
   });
   const temporaryCardZones = new Map<string, TemporaryCardZone>();
   let temporaryZoneSequence = 0;
@@ -297,6 +299,18 @@ export function installMingpaiController(
    * 同区展示不换主人。其余移动先对技能线索，再记进临时区，最后能确定的牌写入引擎。
    */
   function handleCardsMoved(rawEvent: MoveCardEvent): void {
+    if (rawEvent.fromZone === HAND_ZONE && rawEvent.toZone === HAND_ZONE) {
+      const handMoveTrace = {
+        spellId: rawEvent.spellId,
+        moveType: rawEvent.moveType,
+        fromId: rawEvent.fromId,
+        toId: rawEvent.toId,
+        cardCount: rawEvent.cardCount,
+        cardIds: [...rawEvent.cardIds]
+      };
+      traceMingpai('hand-move-raw', handMoveTrace);
+      console.info('[明牌] 手牌移牌原始事件', handMoveTrace);
+    }
     // 明牌专用纠偏：半透明卡号清空 + 牌堆顶/底纠偏。只影响明牌，不改总线原事件。
     if (isIgnoredMove(rawEvent) || isInitialPileLoad(rawEvent)) return;
     const sanitizedIds = sanitizeMoveCardIds(rawEvent.cardCount, normalizeMoveCardIds(rawEvent));
@@ -345,11 +359,17 @@ export function installMingpaiController(
     const controlledSeatCardIds = resolvedCardIds.some((cardId) => cardId > 0)
       ? resolvedCardIds
       : recoverKnownCardsAtSource(movementWithTemporaryCards, seatStateStore, engine);
+    const wholeHandDeparture = isWholeHandDeparture(movementWithTemporaryCards, seatStateStore)
+      || isAllianceWholeHandMove(event);
     const hiddenHandDeparture = event.fromZone === HAND_ZONE
       && !controlledSeatCardIds.some((cardId) => cardId > 0);
-    const wholeHand = hiddenHandDeparture && isWholeHandDeparture(movementWithTemporaryCards, seatStateStore);
-    const recoveredCardIds = wholeHand
-      ? recoverWholeHandMovement(movementWithTemporaryCards, seatStateStore)
+    const wholeHand = wholeHandDeparture && hiddenHandDeparture;
+    // 整手移动时，场景里的已知牌全部随手牌离开；即使协议只给了部分牌号，
+    // 也要把余下的已知牌补进目标座位，避免它们留在来源座位的明牌条。
+    const recoveredCardIds = wholeHandDeparture
+      // 保留上一步从引擎/来源座位恢复出的卡号。原始事件可能省略 CardIDs，
+      // 且场景快照可能已先清空来源手牌，不能在这里重新从它们推导。
+      ? recoverWholeHandMovement({ ...movementWithTemporaryCards, cardIds: controlledSeatCardIds }, seatStateStore)
       : controlledSeatCardIds;
     if (isXinyouCardGain({
       spellMatched: isXinyouSpell(event.spellId),
@@ -419,11 +439,11 @@ export function installMingpaiController(
       toSeatId: event.toId,
       toZone: event.toZone
     });
-    if (hiddenHandDeparture) {
+    if (hiddenHandDeparture || wholeHandDeparture) {
       seatStateStore.applyHiddenHandMovement({
         fromSeatId: event.fromId,
         toSeatId: event.toZone === HAND_ZONE ? event.toId : null,
-        wholeHand
+        wholeHand: wholeHandDeparture
       });
     }
   }
@@ -570,10 +590,16 @@ function takesFromTemporaryZoneBottom(movement: TemporaryZoneMovement): boolean 
 }
 
 const XINYOU_SKILL = { id: 'xinyou', title: '心幽', skillIds: [] as number[], spellNames: ['心幽'] };
+const JIAOYU_SKILL = { id: 'jiaoyu', title: '椒遇', skillIds: [] as number[], spellNames: ['椒遇'] };
 
 function isXinyouSpell(spellId: number): boolean {
   if (!Number.isInteger(spellId) || spellId <= 0) return false;
   return resolveSkillIds(XINYOU_SKILL, locateGameScene(window)).includes(spellId);
+}
+
+function isJiaoyuSpell(spellId: number): boolean {
+  if (!Number.isInteger(spellId) || spellId <= 0) return false;
+  return resolveSkillIds(JIAOYU_SKILL, locateGameScene(window)).includes(spellId);
 }
 
 const QI_STATE_ID = 0xe92;
@@ -582,6 +608,7 @@ const DRAW_PILE_BOTTOM_POSITION = 0;
 const WHOLE_HAND_SHOW_MOVE_TYPE = 24;
 
 interface TemporaryZoneMovement {
+  moveType?: number;
   cardCount: number;
   cardIds: readonly number[];
   fromId: number;
@@ -627,7 +654,27 @@ function recoverKnownCardsAtSource(
   if (movement.cardCount <= 0) return [...movement.cardIds];
   const snapshot = seatStateStore.getSnapshot();
   const seat = snapshot.seats.find((entry) => entry.seatId === movement.fromId);
+  // 鲁肃缔盟会把整手牌交给另一方；引擎按 toId 更新归属，
+  // 这里要从交换前的来源快照恢复明牌卡号。
+  if (isAllianceWholeHandMove(movement)) {
+    // 协议省略卡号时，来源的已知牌与未知占位一起进入临时区。
+    const knownAtSource = [...new Set([
+      ...(seat?.knownCards.map((card) => card.cardId) ?? []),
+      ...engine.getHandCardIds(movement.fromId)
+    ].filter((cardId) => cardId > 0))];
+    if (knownAtSource.length > 0 && knownAtSource.length <= movement.cardCount) {
+      return [...knownAtSource, ...Array.from({ length: movement.cardCount - knownAtSource.length }, () => 0)];
+    }
+  }
   const knownIds = knownIdsInSourceZone(movement, seat, snapshot.controlledSeatIds.includes(movement.fromId), engine);
+  if (movement.fromZone === HAND_ZONE && movement.toZone === HAND_ZONE && seat) {
+    // 部分客户端先更新公开手牌列表、再发隐藏牌号的换牌消息（如缔盟）。
+    // 用事件前引擎记录与当前公开列表做差；只有差集数量精确吻合才认定转出的牌。
+    const visibleNow = new Set(seat.knownCards.map((card) => card.cardId).filter((cardId) => cardId > 0));
+    const departedKnown = engine.getHandCardIds(movement.fromId)
+      .filter((cardId) => cardId > 0 && !visibleNow.has(cardId));
+    if (departedKnown.length === movement.cardCount) return departedKnown;
+  }
   if (!knownIds.length) return [...movement.cardIds];
   // 手里还有暗牌时，协议没给卡号就不能认定移走的是那张明牌。
   if (movement.fromZone === HAND_ZONE && (seat?.unknownCardCount ?? 0) > 0) {
@@ -642,6 +689,15 @@ function recoverKnownCardsAtSource(
     return [...movement.cardIds];
   }
   return knownIds.slice(start, start + movement.cardCount);
+}
+
+/** 缔盟先把双方整手牌分别放入各自的技能临时区，再从临时区交给对方。 */
+function isAllianceWholeHandMove(
+  movement: Pick<TemporaryZoneMovement, 'spellId' | 'moveType' | 'fromZone' | 'toZone'>
+): boolean {
+  return movement.spellId === 121 && movement.moveType === 11
+    && movement.fromZone === HAND_ZONE
+    && movement.toZone === 10;
 }
 
 function knownIdsInSourceZone(
@@ -664,7 +720,7 @@ function knownIdsInSourceZone(
 /** 暗牌整手移走：密诏类技能，或张数 ≥ 当前手牌数。 */
 function isWholeHandDeparture(movement: TemporaryZoneMovement, seatStateStore: SeatStateStore): boolean {
   if (movement.fromZone !== HAND_ZONE) return false;
-  if (isWholeHandMove(movement)) return true;
+  if (isWholeHandMove(movement) || isAllianceWholeHandMove(movement)) return true;
   const seat = seatStateStore.getSnapshot().seats.find((entry) => entry.seatId === movement.fromId);
   if (!seat) return false;
   const handCount = seat.knownCards.length + seat.unknownCardCount;
@@ -676,8 +732,12 @@ function recoverWholeHandMovement(
   movement: TemporaryZoneMovement,
   seatStateStore: SeatStateStore
 ): number[] {
+  const suppliedIds = movement.cardIds.filter((cardId) => cardId > 0);
   const seat = seatStateStore.getSnapshot().seats.find((entry) => entry.seatId === movement.fromId);
-  const knownIds = seat?.knownCards.map((card) => card.cardId).filter((cardId) => cardId > 0) ?? [];
+  const knownIds = [...new Set([
+    ...suppliedIds,
+    ...(seat?.knownCards.map((card) => card.cardId).filter((cardId) => cardId > 0) ?? [])
+  ])];
   if (!knownIds.length || knownIds.length > movement.cardCount) return [...movement.cardIds];
   return [...knownIds, ...Array.from({ length: movement.cardCount - knownIds.length }, () => 0)];
 }
@@ -702,14 +762,14 @@ function recoverCardsFromTemporaryZone(
     movement.spellId
   );
   const exactZone = temporaryCardZones.get(exactKey);
-  if (exactZone && exactZone.cardIds.length >= movement.cardCount) {
+  if (exactZone && exactZone.logicalCardIds.length >= movement.cardCount) {
     return selectDepartingTemporaryCards(exactZone, movement);
   }
   const keyPrefix = `${movement.fromId}:${movement.fromZone}:`;
   const candidates = [...temporaryCardZones.entries()]
     .filter(([key, zone]) => {
       if (!key.startsWith(keyPrefix) || !key.endsWith(`:${movement.spellId}`)
-        || zone.cardIds.length < movement.cardCount) return false;
+        || zone.logicalCardIds.length < movement.cardCount) return false;
       const [, , , zoneParam] = key.split(':').map(Number);
       return !movement.fromZoneParam || zoneParam === movement.fromZoneParam;
     });
@@ -752,7 +812,12 @@ function trackTemporaryZoneMovement(
   const existing = temporaryCardZones.get(key);
   const cardIds = [...new Set([...(existing?.cardIds ?? []), ...knownCardIds])];
   temporaryCardZones.delete(key);
-  temporaryCardZones.set(key, createTemporaryCardZone(cardIds, nextSequence()));
+  const zone = createTemporaryCardZone(cardIds, nextSequence());
+  if (isAllianceWholeHandMove(movement)) {
+    // 缔盟整手暂存必须保留暗牌占位，出区张数包含这些暗牌。
+    zone.logicalCardIds = [...effectiveCardIds];
+  }
+  temporaryCardZones.set(key, zone);
 }
 
 function removeTemporaryCards(
