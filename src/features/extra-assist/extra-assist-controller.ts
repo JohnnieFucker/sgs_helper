@@ -106,6 +106,7 @@ export function installExtraAssistController(
   let activeTurnSeatId: number | null = null;
   let lastTurnCount = 0;
   let appliedTurnCount = 0;
+  const recentZuifengUses = new Map<string, number>();
   if (options.gameEvents) {
     cleanups.push(options.gameEvents.subscribe((event) => {
       if (event.type === 'game-started' || event.type === 'game-ended') {
@@ -113,6 +114,7 @@ export function installExtraAssistController(
         activeTurnSeatId = null;
         lastTurnCount = 0;
         appliedTurnCount = 0;
+        recentZuifengUses.clear();
         refreshZuifeng();
         return;
       }
@@ -124,7 +126,10 @@ export function installExtraAssistController(
         // 两种协议可能重复描述同一次切换；同座位、同回合号不重置已用次数。
         const newTurn = activeTurnSeatId !== event.seatId
           || (lastTurnCount > 0 && lastTurnCount !== appliedTurnCount);
-        if (newTurn) zuifengUses.resetSeat(event.seatId);
+        if (newTurn) {
+          zuifengUses.resetSeat(event.seatId);
+          recentZuifengUses.clear();
+        }
         activeTurnSeatId = event.seatId;
         if (lastTurnCount > 0) appliedTurnCount = lastTurnCount;
         refreshZuifeng();
@@ -136,7 +141,10 @@ export function installExtraAssistController(
         if (event.phase === 0) {
           const newTurn = activeTurnSeatId !== event.seatId
             || (lastTurnCount > 0 && lastTurnCount !== appliedTurnCount);
-          if (newTurn) zuifengUses.resetSeat(event.seatId);
+          if (newTurn) {
+            zuifengUses.resetSeat(event.seatId);
+            recentZuifengUses.clear();
+          }
           if (lastTurnCount > 0) appliedTurnCount = lastTurnCount;
         }
         activeTurnSeatId = event.seatId;
@@ -147,6 +155,22 @@ export function installExtraAssistController(
       const scene = locateGameScene(globalObject);
       const skillIds = zuifengSkillIds(scene);
       if (!skillIds.includes(event.spellId)) return;
+      if (event.seatId !== activeTurnSeatId) return;
+      // 一个主动技可能由客户端和服务器各发一条相同的使用通知；同一回合内
+      // 1.2 秒内完全相同的目标/卡牌签名只算一次，避免剩余次数一次跳两格。
+      const signature = [
+        event.seatId,
+        event.spellId,
+        [...event.targetSeatIds].sort((left, right) => left - right).join(','),
+        [...event.cardIds].sort((left, right) => left - right).join(',')
+      ].join(':');
+      const now = Date.now();
+      const previousUseAt = recentZuifengUses.get(signature);
+      if (previousUseAt !== undefined && now - previousUseAt < 1200) return;
+      recentZuifengUses.set(signature, now);
+      for (const [key, usedAt] of recentZuifengUses) {
+        if (now - usedAt > 10000) recentZuifengUses.delete(key);
+      }
       zuifengUses.noteUse(event.seatId);
       refreshZuifeng();
     }));
