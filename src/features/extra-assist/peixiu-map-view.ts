@@ -284,7 +284,7 @@ function renderRemainingSuits(host: PeixiuOverlayHost, size: { width: number; he
     panel.visible = false;
     return;
   }
-  const fontSize = 18;
+  const fontSize = 15;
   const pad = 8;
   const gap = 6;
   const titleWidth = estimateTextWidth('剩余步骤', fontSize);
@@ -315,6 +315,7 @@ function renderRemainingSuits(host: PeixiuOverlayHost, size: { width: number; he
       labels[index] = label;
     }
     label.text = text;
+    label.fontSize = fontSize;
     label.color = color;
     label.strokeColor = stroke;
     label.size?.(itemWidth, SLIDER_HEIGHT);
@@ -370,7 +371,7 @@ function renderSlider(
       const label = new Text();
       label.mouseEnabled = false;
       label.font = FONT;
-      label.fontSize = 18;
+      label.fontSize = 15;
       label.bold = true;
       label.align = 'center';
       label.valign = 'middle';
@@ -399,6 +400,7 @@ function renderSlider(
     label.pos?.(index * SLIDER_SLOT, 0);
     label.visible = index < count;
     const steps = (solutions[index]?.path || []).filter((step) => step?.dir).length;
+    label.fontSize = 15;
     label.text = `${index === 0 ? '上策' : index === 1 ? '中策' : '下策'}${steps}`;
     label.color = index === selected ? '#FFF6D4' : '#9B927F';
   });
@@ -486,7 +488,7 @@ function renderSequence(
     rich.mouseThrough = true;
     Object.assign(asRecord(rich.style) ?? {}, {
       color: '#0A0A0A',
-      fontSize: 34,
+      fontSize: 26,
       fontFamily: FONT,
       bold: true,
       stroke: 2,
@@ -504,14 +506,14 @@ function renderSequence(
   const rect = boardRectIn(board, hostNode, size, globalObject);
   const width = Math.max(240, Math.min(900, rect.width + 152));
   box.pos?.(rect.x + 4 * rect.scaleX, rect.y + rect.height + 60 * rect.scaleY + 12);
-  box.size?.(width, 56);
+  box.size?.(width, 42);
   const rich = asRecord(box.__xcPeiXiuRichTextNode);
-  rich?.size?.(width, 50);
+  rich?.size?.(width, 36);
   if (rich?.style) {
     Object.assign(asRecord(rich.style)!, {
       width,
       color: '#0A0A0A',
-      fontSize: 34,
+      fontSize: 26,
       fontFamily: FONT,
       bold: true,
       stroke: 2,
@@ -567,7 +569,7 @@ function showSkillBubble(host: PeixiuOverlayHost, text: string, anchor: UnknownR
     const label = new Text();
     label.name = 'xcPeiXiuSkillBubbleText';
     label.font = FONT;
-    label.fontSize = 26;
+    label.fontSize = 20;
     label.color = '#FFF6D4';
     label.wordWrap = true;
     bubble.addChild?.(label);
@@ -575,15 +577,15 @@ function showSkillBubble(host: PeixiuOverlayHost, text: string, anchor: UnknownR
     host.__xcPeiXiuSkillBubble = bubble;
   }
   if (bubble.parent !== layer) layer.addChild?.(bubble);
-  const width = Math.min(560, Math.max(260, estimateTextWidth(text, 26) + 32));
-  const height = 78;
+  const width = Math.min(560, Math.max(220, estimateTextWidth(text, 20) + 28));
+  const height = 62;
   bubble.size?.(width, height);
   bubble.graphics?.clear?.();
   bubble.graphics?.drawRect?.(0, 0, width, height, '#2A241B');
   const label = asRecord(bubble.__xcPeiXiuText);
   if (label) {
     label.text = text;
-    label.fontSize = 26;
+    label.fontSize = 20;
     label.size?.(width - 28, height - 18);
     label.pos?.(14, 9);
   }
@@ -618,7 +620,7 @@ function renderSkills(
   let used = 0;
   let overflow = false;
   for (const item of items) {
-    const width = Math.max(40, estimateTextWidth(String(item.name || ''), 32) + 12);
+    const width = Math.max(32, estimateTextWidth(String(item.name || ''), 24) + 8);
     if (used + width > maxWidth) {
       overflow = true;
       break;
@@ -632,7 +634,7 @@ function renderSkills(
   }
   const baseX = rect.x + 4 * rect.scaleX;
   const baseY = rect.y + rect.height + 60 * rect.scaleY + 12;
-  const y = baseY + (hasSequence ? 56 : 0);
+  const y = baseY + (hasSequence ? 42 : 0);
   fitted.forEach((item, index) => {
     let label = labels[index];
     if (!label || label.destroyed) {
@@ -641,7 +643,7 @@ function renderSkills(
       label.mouseEnabled = true;
       label.mouseThrough = false;
       label.font = FONT;
-      label.fontSize = 32;
+      label.fontSize = 24;
       label.bold = true;
       label.color = '#0A0A0A';
       label.stroke = 2;
@@ -663,8 +665,8 @@ function renderSkills(
     if (label.parent !== layer) layer.addChild?.(label);
     label.text = item.name;
     label.__xcPeiXiuSkillDescription = item.description || '';
-    label.fontSize = 32;
-    label.size?.(item.width, 44);
+    label.fontSize = 24;
+    label.size?.(item.width, 34);
     label.pos?.(baseX + fitted.slice(0, index).reduce((sum, current) => sum + current.width, 0), y);
     label.visible = true;
   });
@@ -806,7 +808,7 @@ export function renderPeixiuRoute(options: {
     const label = ensureStepLabel(host, labelIndex, globalObject);
     if (label) {
       label.text = String(stepNo);
-      label.fontSize = stepNo >= 10 ? 14 : 16;
+      label.fontSize = stepNo >= 10 ? 12 : 14;
       label.color = step.available === false ? '#5C2A14' : '#0A3D28';
       label.strokeColor = step.available === false ? '#FFFBE8' : '#F2FFF7';
       label.size?.(24, 22);

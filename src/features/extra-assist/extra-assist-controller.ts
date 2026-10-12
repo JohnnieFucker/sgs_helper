@@ -99,13 +99,19 @@ export function installExtraAssistController(
     globalObject,
     cardLookup: { getCard: options.getCard },
     getReward: (rewardId) => readConfig()?.peiXiuRewards[rewardId] ?? null,
-    routeStore: options.peixiuRouteStore
+    findRewardByName: (name) => {
+      const rewards = Object.values(readConfig()?.peiXiuRewards ?? {});
+      return rewards.find((item) => item.name === name)?.rewardId ?? 0;
+    },
+    routeStore: options.peixiuRouteStore,
+    getTurnKey: () => peixiuTurnKey
   }));
 
   const zuifengUses = createZuifengUses();
   let activeTurnSeatId: number | null = null;
   let lastTurnCount = 0;
   let appliedTurnCount = 0;
+  let peixiuTurnKey = '0';
   const recentZuifengUses = new Map<string, number>();
   if (options.gameEvents) {
     cleanups.push(options.gameEvents.subscribe((event) => {
@@ -114,6 +120,7 @@ export function installExtraAssistController(
         activeTurnSeatId = null;
         lastTurnCount = 0;
         appliedTurnCount = 0;
+        peixiuTurnKey = '0';
         recentZuifengUses.clear();
         refreshZuifeng();
         return;
@@ -127,6 +134,7 @@ export function installExtraAssistController(
         const newTurn = activeTurnSeatId !== event.seatId
           || (lastTurnCount > 0 && lastTurnCount !== appliedTurnCount);
         if (newTurn) {
+          peixiuTurnKey = `${lastTurnCount}:${event.seatId}`;
           zuifengUses.resetSeat(event.seatId);
           recentZuifengUses.clear();
         }
@@ -142,6 +150,7 @@ export function installExtraAssistController(
           const newTurn = activeTurnSeatId !== event.seatId
             || (lastTurnCount > 0 && lastTurnCount !== appliedTurnCount);
           if (newTurn) {
+            peixiuTurnKey = `${lastTurnCount}:${event.seatId}`;
             zuifengUses.resetSeat(event.seatId);
             recentZuifengUses.clear();
           }

@@ -53,6 +53,7 @@ export interface PeixiuMapConfig {
   specials: Map<number, PeixiuSpecialCell>;
   rewards: PeixiuRewardCell[];
   rewardCells: number[];
+  cityRewardIds: number[];
   color: number;
 }
 
@@ -166,6 +167,22 @@ export function parseRewardCells(raw: unknown): PeixiuRewardCell[] {
   });
 }
 
+function readCityRewardIds(record: Record<string, unknown>): number[] {
+  const ids: number[] = [];
+  for (const key of ['ID', 'id', 'mapId', 'MapID', 'cityID', 'CityID', 'cityId', 'rewardID', 'RewardID']) {
+    const id = Number(record[key]);
+    if (Number.isInteger(id) && id > 0 && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+function readMapCityName(record: Record<string, unknown>): string {
+  const specific = pickField(record, 'cityName', 'CityName', 'mapName', 'MapName');
+  const raw = String(specific || record.name || record.Name || '').trim();
+  if (!raw || /PeiXiu|Map|Background/i.test(raw)) return '';
+  return raw;
+}
+
 /** 把裴秀地图配置收成棋盘模型。 */
 export function parsePeixiuMapConfig(raw: unknown): PeixiuMapConfig | null {
   if (!raw || typeof raw !== 'object') return null;
@@ -191,12 +208,13 @@ export function parsePeixiuMapConfig(raw: unknown): PeixiuMapConfig | null {
   )].sort((left, right) => left - right);
   return {
     id: Number(pickField(record, 'cellID', 'CellID', 'id', 'mapId', 'ID') ?? 0) || 0,
-    name: String(record.name || ''),
+    name: readMapCityName(record),
     cells,
     start: normalizeCell(pickField(record, 'precell', 'PreCell', 'start') || 0),
     specials,
     rewards,
     rewardCells,
+    cityRewardIds: readCityRewardIds(record),
     color: Number(pickField(record, 'color', 'Color') ?? 0) || 0
   };
 }

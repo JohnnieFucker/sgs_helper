@@ -32,6 +32,7 @@ export interface PeixiuCardLookup {
 
 export interface PeixiuRewardLookup {
   getReward?(rewardId: number): PeixiuRewardInfo | null;
+  findByName?(name: string): number;
 }
 
 const emptySnapshot = (): PeixiuResourceSnapshot => ({
@@ -208,28 +209,88 @@ export function readCurrentSeatId(globalObject?: LayaRuntimeWindow, gameContext?
   return id == null ? '' : String(id);
 }
 
-/** 收集本家已拥有技能 ID 列表。 */
+/**
+ * 本回合新走到的格子上的奖励。
+ * 地图刚展开时格子上已经画着的城市技能不算已获得；
+ * 换回合后以上一回合结束时的格子为基准，那些奖励不再显示。
+ */
+export function rewardIdsCollectedSince(
+  collectedCells: number[],
+  baseline: ReadonlySet<number>,
+  rewardAt: (cell: number) => number,
+  alwaysCells: number[] = []
+): number[] {
+  const ids = new Set<number>();
+  for (const cell of alwaysCells) {
+    const rewardId = rewardAt(cell);
+    if (rewardId) ids.add(rewardId);
+  }
+  for (const cell of collectedCells) {
+    if (baseline.has(cell)) continue;
+    const rewardId = rewardAt(cell);
+    if (rewardId) ids.add(rewardId);
+  }
+  return [...ids];
+}
+
+/** 新地图拿到的城接在已有列表后面，不覆盖之前的城。 */
+export function appendRewardIds(owned: readonly number[], incoming: readonly number[]): number[] {
+  const next = [...owned];
+  for (const id of incoming) {
+    if (id && !next.includes(id)) next.push(id);
+  }
+  return next;
+}
+
+function isSelfCityReward(reward: { cell?: number; rawCell?: number; type?: unknown }): boolean {
+  const type = Number(reward.type);
+  const cell = Number(reward.cell);
+  const rawCell = Number(reward.rawCell);
+  return type === 26 || rawCell === 26 || (cell === 26) || (cell !== 0 && (cell < 1 || cell > 25));
+}
+
+/**
+ * 当前地图所在的城。走到琅琊、徐州时，回合结束仍会带上彭城。
+ * 彭城不在棋盘奖励格上，要按地图城名或唯一的本城技能来认。
+ */
+export function defaultMapCityRewardId(
+  map: {
+    id?: number;
+    name?: string;
+    cityRewardIds?: number[];
+    rewards?: Array<{ cell?: number; rawCell?: number; rewardId?: number; type?: unknown }>;
+  } | null | undefined,
+  lookup: PeixiuRewardLookup
+): number {
+  const mapName = String(map?.name || '').trim();
+  const rewards = map?.rewards || [];
+  if (mapName) {
+    const namedOnMap = rewards.find((item) => lookup.getReward?.(Number(item.rewardId))?.name === mapName);
+    if (Number(namedOnMap?.rewardId)) return Number(namedOnMap?.rewardId);
+    const named = lookup.findByName?.(mapName) || 0;
+    if (named) return named;
+  }
+  const selfCity = rewards.filter((item) => Number(item.rewardId) && isSelfCityReward(item));
+  if (selfCity.length === 1) return Number(selfCity[0].rewardId);
+  const candidates = [...(map?.cityRewardIds || [])];
+  const mapId = Number(map?.id) || 0;
+  if (mapId && !candidates.includes(mapId)) candidates.push(mapId);
+  for (const id of candidates) {
+    const info = lookup.getReward?.(id);
+    if (info?.name && (!mapName || info.name === mapName)) return id;
+  }
+  return 0;
+}
+
+/** 收集指定格子上已获得的技能。配置里整座城的技能列表不计入。 */
 export function collectOwnedSkills(
   map: { rewards?: Array<{ cell?: number; rawCell?: number; rewardId?: number; type?: unknown }> } | null | undefined,
   collectedCells: number[],
   lookup: PeixiuRewardLookup,
   rewardAt: (cell: number) => number
 ): PeixiuRewardInfo[] {
-  const ids = new Set<number>();
-  for (const reward of map?.rewards || []) {
-    const type = Number(reward.type);
-    // 正式服对象配置用 RewardType=26 表示角色自身携带的城市技能；
-    // 字符串配置则写成“26,奖励ID”，此时 26 会落在 cell/rawCell。
-    const isSelfCitySkill = type === 26
-      || Number(reward.rawCell) === 26
-      || Number(reward.cell) === 26;
-    if (isSelfCitySkill && Number(reward.rewardId)) ids.add(Number(reward.rewardId));
-  }
-  for (const cell of collectedCells) {
-    const rewardId = rewardAt(cell);
-    if (rewardId) ids.add(rewardId);
-  }
-  return [...ids]
+  void map;
+  return rewardIdsCollectedSince(collectedCells, new Set(), rewardAt)
     .map((rewardId) => lookup.getReward?.(rewardId) ?? { rewardId, name: `地图技#${rewardId}`, description: '' })
     .filter((item) => item.name);
 }

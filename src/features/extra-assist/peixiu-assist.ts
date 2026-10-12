@@ -13,11 +13,13 @@ import {
   type PeixiuRewardInfo
 } from './peixiu-map-model.ts';
 import {
-  collectOwnedSkills,
+  appendRewardIds,
   collectPeixiuResources,
   readCurrentSeatId,
   readSelfSeatId,
+  defaultMapCityRewardId,
   resolveRewardIdAt,
+  rewardIdsCollectedSince,
   type PeixiuCardLookup
 } from './peixiu-resources.ts';
 import { planPeixiuRoute } from './peixiu-route-planner.ts';
@@ -38,8 +40,11 @@ export interface PeixiuAssistOptions {
   globalObject?: LayaRuntimeWindow;
   cardLookup?: PeixiuCardLookup;
   getReward?: (rewardId: number) => PeixiuRewardInfo | null;
+  findRewardByName?: (name: string) => number;
   routeStore?: PeixiuRouteStore;
   pollIntervalMs?: number;
+  /** 回合切换时变化。回合结束清空已获得的城。 */
+  getTurnKey?: () => string;
 }
 
 function asRecord(value: unknown): UnknownRecord | null {
@@ -171,10 +176,22 @@ export function installPeixiuAssist(options: PeixiuAssistOptions): () => void {
   let disposed = false;
   let handRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   const handPatchedMethods = new WeakMap<object, Set<string>>();
-  const ownedSkills: { gameContext: object | null; selfSeatId: string; ids: Set<number> } = {
+  const skillScope: {
+    gameContext: object | null;
+    selfSeatId: string;
+    mapKey: string;
+    turnKey: string;
+    baseline: Set<number>;
+    homeCell: number;
+    ownedIds: number[];
+  } = {
     gameContext: null,
     selfSeatId: '',
-    ids: new Set<number>()
+    mapKey: '',
+    turnKey: '',
+    baseline: new Set<number>(),
+    homeCell: 0,
+    ownedIds: []
   };
 
   function report(stage: string, detail: UnknownRecord = {}): void {
@@ -448,33 +465,45 @@ export function installPeixiuAssist(options: PeixiuAssistOptions): () => void {
       cardLookup: options.cardLookup
     });
     const parsedMap = parsePeixiuMapConfig(config);
+    const rawCollected = collectedCellsOf(host);
+    const mapFingerprint = fingerprintMapConfig(config);
     const gameContext = asRecord(options.locator.gameContext())
       ?? asRecord((globalObject as UnknownRecord).GameContext);
     const selfSeatId = readSelfSeatId(globalObject, gameContext);
-    // 城市技能贯穿整局裴秀流程：换地图、地图对象重建、轮次变化都不能清空。
-    // 只在进入另一局（GameContext 被替换）或本机座位变化时重新开始累计。
-    if (ownedSkills.gameContext !== gameContext || ownedSkills.selfSeatId !== selfSeatId) {
-      ownedSkills.gameContext = gameContext;
-      ownedSkills.selfSeatId = selfSeatId;
-      ownedSkills.ids.clear();
+    const turnKey = options.getTurnKey?.() ?? '';
+    if (skillScope.gameContext !== gameContext || skillScope.selfSeatId !== selfSeatId || skillScope.turnKey !== turnKey) {
+      skillScope.gameContext = gameContext;
+      skillScope.selfSeatId = selfSeatId;
+      skillScope.turnKey = turnKey;
+      skillScope.mapKey = '';
+      skillScope.ownedIds = [];
     }
-    const rawCollected = collectedCellsOf(host);
-    collectOwnedSkills(
-      { rewards: (parsedMap?.rewards || []).map((item) => ({
-        cell: item.cell,
-        rawCell: item.rawCell,
-        rewardId: item.rewardId,
-        type: item.type
-      })) },
+    const mapChanged = skillScope.mapKey !== mapFingerprint;
+    // 同一回合里换图，新走到的城接在已有列表后面。
+    // 新地图展开时已经画上的格子不算新获得。回合结束再清空。
+    if (mapChanged) {
+      const current = resolveCurrentCell(host);
+      const start = parsedMap?.start ?? 0;
+      skillScope.homeCell = resolveRewardIdAt(parsedMap, start) ? start : current;
+      skillScope.mapKey = mapFingerprint;
+      skillScope.baseline = new Set(rawCollected);
+    }
+    const rewardIds = rewardIdsCollectedSince(
       rawCollected,
-      { getReward: options.getReward },
-      (cell) => resolveRewardIdAt(parsedMap, cell)
-    ).forEach((item) => ownedSkills.ids.add(item.rewardId));
+      skillScope.baseline,
+      (cell) => resolveRewardIdAt(parsedMap, cell),
+      skillScope.homeCell ? [skillScope.homeCell] : []
+    );
+    const cityRewardId = defaultMapCityRewardId(parsedMap, {
+      getReward: options.getReward,
+      findByName: options.findRewardByName
+    });
+    if (cityRewardId && !rewardIds.includes(cityRewardId)) rewardIds.push(cityRewardId);
+    skillScope.ownedIds = appendRewardIds(skillScope.ownedIds, rewardIds);
     // 路线状态只能使用游戏实际记录的已收集格。奖励 ID 可能跨地图复用，
     // 不能由“已获得技能”反向推断格子，否则会删错格并改变最佳首步。
     const collected = [...new Set(rawCollected)];
     const startCell = resolveCurrentCell(host);
-    const mapFingerprint = fingerprintMapConfig(config);
     const progressKey = [mapFingerprint, startCell, collected.join(',')].join('#');
     const overlayHost = overlayHostFor(host);
     // 地图、当前位置或已领取格变化时，回到第一套（上策）路线。
@@ -528,7 +557,7 @@ export function installPeixiuAssist(options: PeixiuAssistOptions): () => void {
       return;
     }
     host.__xcPeiXiuRouteCache = { key: cacheKey, result: planned };
-    const skills = [...ownedSkills.ids]
+    const skills = skillScope.ownedIds
       .map((id) => options.getReward?.(id) ?? { rewardId: id, name: `地图技#${id}`, description: '' })
       .filter((item) => item.name);
     if (planned) options.routeStore?.publish(planned, skills);
