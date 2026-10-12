@@ -125,7 +125,7 @@ export function bootstrapXiaochao(platform: PlatformAdapter): void {
   lifecycle.register(installCountdownSecondsController(configStore));
   lifecycle.register(installCardLabelController(configStore));
   lifecycle.register(installAiPlayerTipController(gameEvents));
-  lifecycle.register(installChooseFigureController());
+  lifecycle.register(installChooseFigureController(window, gameEvents));
   lifecycle.register(installHandSortController(configStore));
   lifecycle.register(installSelectionToolsController());
   lifecycle.register(installTiesuoRecastController());

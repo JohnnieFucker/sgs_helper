@@ -183,7 +183,7 @@ async function main() {
 
   if (!isAdmin()) {
     fail(process.platform === 'win32'
-      ? '需要管理员权限。用根目录 deploy.bat（会自动提权）。'
+      ? '需要管理员权限。用管理员身份执行 npm run deploy。'
       : '需要管理员权限。执行: sudo npm run deploy');
     return;
   }

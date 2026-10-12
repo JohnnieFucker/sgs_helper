@@ -130,7 +130,7 @@ if (!resolved) {
     '  2) 设置 SGSOL_ELECTRON_PATH=完整路径\\electron.exe',
     '  3) 把 electron 解压到 tools\\electron-runtime\\electron.exe',
     '',
-    '验证打包样式请用 .\\deploy.bat，不要用 SGSOL.exe 冒充 dev。'
+    '验证打包样式请用管理员身份执行 npm run deploy，不要用 SGSOL.exe 冒充 dev。'
   ].join('\n'));
   process.exit(1);
 }

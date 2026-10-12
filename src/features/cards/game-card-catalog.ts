@@ -1,5 +1,5 @@
 /**
- * 本局卡牌目录：结合场景与官方配置解析 cardId → 名称/花色/点数/立绘。
+ * 本局卡牌目录：结合场景与官方配置解析 cardId → 名称/花色/点数。
  */
 
 import type { GameSceneSeatSource } from '../seat-display/seat-game-adapter.ts';
@@ -16,8 +16,6 @@ export interface GameCardMetadata {
   isRed: boolean;
   /** 游戏原生卡牌类型编号；无法读取时为 0。 */
   cardType: number;
-  /** 游戏模型直接暴露独立牌面资源时使用；图集资源无法裁切时保持空字符串。 */
-  artworkUrl: string;
 }
 
 export interface GameCardCatalog {
@@ -51,8 +49,7 @@ export function createGameCardCatalog(
     resolve(rawCardId) {
       const cardId = positiveInteger(rawCardId) ?? 0;
       const cached = cache.get(cardId);
-      // 元数据一旦读过就复用。原先要求 artworkUrl 才命中缓存，会在 Electron
-      // 截图失败时每次 resolve 都再次走原生牌面池，把弃牌弹层正在用的 UI 清掉。
+      // 元数据一旦读过就复用，避免每次解析都再走原生牌面池。
       if (cached) return cached;
 
       const scene = getGameScene();
@@ -166,10 +163,7 @@ function readCardMetadata(
         ?? cardData?.cardType
         ?? cardData?.Type
         ?? cardData?.type
-    ) ?? 0,
-    // 不在热路径截官方牌面：drawToCanvas 会再借一张原生 CardUi，弃牌弹层打开时
-    // 会把已经画上的牌还回对象池，表现为「标题有张数、中间是空的」。
-    artworkUrl: ''
+    ) ?? 0
   };
 }
 
@@ -215,104 +209,6 @@ function findNativeCardMetadata(card: UnknownRecord | null): UnknownRecord | nul
     'CardName', 'cardName', 'Name', 'name', 'IconName', 'iconName',
     'Color', 'color', 'Number', 'number'
   ].some((key) => candidate[key] !== undefined)) ?? card;
-}
-
-function readArtworkUrl(nativeCard: UnknownRecord | null, cardId: number): string {
-  if (!nativeCard) return '';
-  for (const key of ['CardImage', 'cardImage', 'ImageUrl', 'imageUrl', 'IconUrl', 'iconUrl', 'ResPath', 'resPath']) {
-    const candidate = normalizeArtworkUrl(nativeCard[key]);
-    if (candidate) return candidate;
-  }
-  for (const methodName of ['getCardPath', 'GetCardPath', 'getCardUrl', 'GetCardUrl']) {
-    const method = nativeCard[methodName];
-    if (typeof method !== 'function') continue;
-    try {
-      const candidate = normalizeArtworkUrl(method.call(nativeCard, cardId));
-      if (candidate) return candidate;
-    } catch {
-      // 不同版本方法签名可能不同，继续使用语义牌面降级。
-    }
-  }
-  return '';
-}
-
-function normalizeArtworkUrl(value: unknown): string {
-  if (typeof value !== 'string' || !value.trim()) return '';
-  const path = value.trim();
-  // Laya 图集键（例如 xxx_png）不是浏览器可直接显示的图片地址。
-  if (!/\.(?:png|jpe?g|webp)(?:[?#].*)?$/i.test(path) && !/^data:image\//i.test(path)) return '';
-  try {
-    return typeof document === 'undefined' ? path : new URL(path, document.baseURI).href;
-  } catch {
-    return '';
-  }
-}
-
-/** 按原版 cards/<IconName>.png 规则读取 Laya 已加载纹理，并自行裁出图集子区域。 */
-function readLoadedCardTexture(nativeCard: UnknownRecord | null): string {
-  if (!nativeCard || typeof document === 'undefined') return '';
-  const resourceKey = readString(nativeCard, [
-    'IconName', 'iconName', 'CardIcon', 'cardIcon', 'ResName', 'resName', 'resource'
-  ]).replace(/^cards\//, '').replace(/\.png$/i, '');
-  if (!resourceKey) return '';
-  const rawPath = `cards/${resourceKey}.png`;
-  const laya = asRecord((globalThis as UnknownRecord).Laya);
-  const urlApi = asRecord(laya?.URL);
-  const loader = asRecord(laya?.loader);
-  const formatUrl = urlApi?.formatURL;
-  const getResource = loader?.getRes ?? loader?.getResource;
-  if (typeof getResource !== 'function') return '';
-  let formattedPath = rawPath;
-  try {
-    if (typeof formatUrl === 'function') formattedPath = String(formatUrl.call(urlApi, rawPath));
-    const texture = asRecord(getResource.call(loader, formattedPath))
-      ?? asRecord(getResource.call(loader, rawPath));
-    return texture ? textureToDataUrl(texture) : '';
-  } catch {
-    return '';
-  }
-}
-
-function textureToDataUrl(texture: UnknownRecord): string {
-  const bitmap = asRecord(texture.bitmap) ?? asRecord(texture._bitmap);
-  const source = bitmap?.source ?? bitmap?._source ?? texture.source;
-  if (!source || typeof source !== 'object') return '';
-  const sourceRecord = source as UnknownRecord;
-  const sourceWidth = Number(sourceRecord.naturalWidth ?? sourceRecord.videoWidth ?? sourceRecord.width);
-  const sourceHeight = Number(sourceRecord.naturalHeight ?? sourceRecord.videoHeight ?? sourceRecord.height);
-  if (!(sourceWidth > 0 && sourceHeight > 0)) return '';
-
-  const uv = Array.isArray(texture.uv) ? texture.uv.map(Number) : [];
-  const uValues = uv.filter((_, index) => index % 2 === 0);
-  const vValues = uv.filter((_, index) => index % 2 === 1);
-  const sourceX = uValues.length ? Math.min(...uValues) * sourceWidth : Number(texture.x ?? 0);
-  const sourceY = vValues.length ? Math.min(...vValues) * sourceHeight : Number(texture.y ?? 0);
-  const cropWidth = uValues.length
-    ? (Math.max(...uValues) - Math.min(...uValues)) * sourceWidth
-    : Number(texture.width ?? sourceWidth);
-  const cropHeight = vValues.length
-    ? (Math.max(...vValues) - Math.min(...vValues)) * sourceHeight
-    : Number(texture.height ?? sourceHeight);
-  if (!(cropWidth > 0 && cropHeight > 0)) return '';
-
-  const outputWidth = Math.max(1, Math.round(Number(texture.sourceWidth ?? texture.width ?? cropWidth)));
-  const outputHeight = Math.max(1, Math.round(Number(texture.sourceHeight ?? texture.height ?? cropHeight)));
-  const canvas = document.createElement('canvas');
-  canvas.width = outputWidth;
-  canvas.height = outputHeight;
-  const context = canvas.getContext('2d');
-  if (!context) return '';
-  try {
-    context.drawImage(
-      source as CanvasImageSource,
-      Math.round(sourceX), Math.round(sourceY), Math.round(cropWidth), Math.round(cropHeight),
-      0, 0, outputWidth, outputHeight
-    );
-    return canvas.toDataURL('image/png');
-  } catch {
-    // 跨域图片或非浏览器图像源不可导出时使用语义牌面。
-    return '';
-  }
 }
 
 function formatRank(number: number): string {

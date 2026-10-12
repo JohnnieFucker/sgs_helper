@@ -61,8 +61,7 @@
     "dev:electron": "node tools/dev.js",
     "dev:userscript": "vite --config vite.userscript.config.ts",
     "dev:ui": "vite --config vite.ui.config.ts",
-    "typecheck": "node -e \"console.log('TypeScript checking is temporarily disabled.')\"",
-    "check": "node tools/check.cjs"
+    "typecheck": "node -e \"console.log('TypeScript checking is temporarily disabled.')\""
   },
   "dependencies": {
     "vue": "^3.5.43"

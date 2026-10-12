@@ -1,52 +1,255 @@
 /**
- * 自选身份：按房间座位顺序把身份显示到座位上。
- * 只看桌子设置里的自选身份开关，等待房间和牌局里都写。
+ * 身份演武中的自选身份 / 自选反贼 / 自选主忠：按房间座位顺序显示身份。
  */
 
 import { createLayaObjectLocator } from '../../adapters/laya-object-locator.ts';
 import { locateGameEventDispatcher, locateGameScene, type GameRuntimeWindow } from '../seat-display/game-scene-locator.ts';
+import type { GameEventBus } from '../../runtime/game-event-bus.ts';
 import { figureByClientOrder } from './choose-figure.ts';
 
 type UnknownRecord = Record<string, unknown>;
+const DEBUG_KEY = '__XIAOCHAO_CHOOSE_FIGURE_DEBUG__';
+
+interface ChooseFigureDebugState {
+  enabled: true;
+  history: Array<Record<string, unknown>>;
+  last: Record<string, unknown> | null;
+  clear(): void;
+}
 
 /** 挂上轮询：进局后反复尝试，直到房间座位和武将牌都就绪。 */
 export function installChooseFigureController(
-  globalObject: GameRuntimeWindow = window
+  globalObject: GameRuntimeWindow = window,
+  gameEvents?: GameEventBus
 ): () => void {
+  let stableClientIds: string[] = [];
+  let stableRoomKey = '';
+  let lastDebugSignature = '';
+  let lastDebugAt = 0;
+  const debug = createDebugState(globalObject);
   const timer = globalObject.setInterval(applyChooseFigures, 500);
+  const unsubscribe = gameEvents?.subscribe((event) => {
+    if (event.type === 'game-reconnected') {
+      recordDebug(debug, { event: 'game-reconnected', stableRoomKey, stableClientTokens: stableClientIds.map(clientToken) });
+    }
+    if (event.type === 'game-ended') {
+      recordDebug(debug, { event: 'game-ended', stableRoomKey, stableClientTokens: stableClientIds.map(clientToken) });
+      stableClientIds = [];
+      stableRoomKey = '';
+    }
+  });
   applyChooseFigures();
-  return () => globalObject.clearInterval(timer);
+  return () => {
+    globalObject.clearInterval(timer);
+    unsubscribe?.();
+  };
 
   function applyChooseFigures(): void {
     try {
       const locator = createLayaObjectLocator(globalObject);
       const room = roomController(globalObject);
       const setting = asRecord(room?.TableSetting) ?? asRecord(room?.tableSetting);
-      if (!isChooseFigure(setting)) return;
-      const clientIds = readClientIds(
+      const mode = readMode(globalObject, room, setting);
+      const settingSnapshot = readIdentitySettingSnapshot(setting);
+      if (!shouldRevealIdentityFigures(mode)) {
+        const debugSnapshot = {
+          event: 'poll', roomKey: readRoomKey(room), setting: settingSnapshot,
+          modeText: mode.modeText, modeType: mode.modeType, chooseMode: mode.chooseFigure, modeEnabled: false
+        };
+        const signature = JSON.stringify(debugSnapshot);
+        const now = Date.now();
+        if (signature !== lastDebugSignature || now - lastDebugAt >= 2000) {
+          recordDebug(debug, debugSnapshot);
+          lastDebugSignature = signature;
+          lastDebugAt = now;
+        }
+        return;
+      }
+      const currentClientIds = readClientIds(
         asRecord(room?.TabbleSeatInfos)
         ?? asRecord(room?.tabbleSeatInfos)
         ?? asRecord(room?.TableSeatInfos)
         ?? asRecord(room?.tableSeatInfos)
       );
-      if (clientIds.length !== 8) return;
-      const seatUis = readSeatUis(seatScene(globalObject, locator));
-      for (const seatUi of seatUis) {
-        const clientId = readSeatClientId(asRecord(seatUi.seat));
-        const figure = figureByClientOrder(clientIds, clientId);
-        if (figure > 0) revealFigure(asRecord(seatUi.figureManager) ?? asRecord(seatUi.FigureManager), figure);
+      if (currentClientIds.length !== 8) {
+        recordDebug(debug, {
+          event: 'poll', diagnostic: 'room-seat-list-not-ready',
+          roomKey: readRoomKey(room), modeText: mode.modeText, modeType: mode.modeType,
+          chooseMode: mode.chooseFigure, modeEnabled: true,
+          seatListLength: readSeatListLength(room)
+        });
+        return;
       }
-    } catch {
-      // 房间信息未就绪时跳过。
+      const roomKey = readRoomKey(room);
+      if (roomKey && stableRoomKey && roomKey !== stableRoomKey) {
+        stableClientIds = [];
+      }
+      if (!stableClientIds.length) {
+        stableClientIds = currentClientIds;
+        stableRoomKey = roomKey;
+      }
+      const scene = seatScene(globalObject, locator);
+      const seatUis = readSeatUis(scene);
+      const seatMappings: Array<Record<string, unknown>> = [];
+      for (const seatUi of seatUis) {
+        const seat = asRecord(seatUi.seat);
+        const clientId = readSeatClientId(seat);
+        const figure = figureByClientOrder(stableClientIds, clientId);
+        const manager = asRecord(seatUi.figureManager) ?? asRecord(seatUi.FigureManager);
+        const currentFigure = Number(manager?.Figure);
+        if (figure > 0) revealFigure(manager, figure);
+        seatMappings.push({
+          seatId: readSeatId(seat),
+          clientToken: clientToken(clientId),
+          isSelf: seatUi === scene?.SelfSeatUi,
+          currentFigure,
+          expectedFigure: figure
+        });
+      }
+      const debugSnapshot = {
+        event: 'poll',
+        roomKey,
+        setting: settingSnapshot,
+        modeText: mode.modeText,
+        modeType: mode.modeType,
+        chooseMode: mode.chooseFigure,
+        modeEnabled: true,
+        currentClientTokens: currentClientIds.map(clientToken),
+        stableRoomKey,
+        stableClientTokens: stableClientIds.map(clientToken),
+        seats: seatMappings
+      };
+      const signature = JSON.stringify(debugSnapshot);
+      const now = Date.now();
+      if (signature !== lastDebugSignature || now - lastDebugAt >= 2000) {
+        recordDebug(debug, debugSnapshot);
+        lastDebugSignature = signature;
+        lastDebugAt = now;
+      }
+    } catch (error) {
+      recordDebug(debug, {
+        event: 'error',
+        error: error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+      });
     }
   }
+}
+
+/** 只在身份演武（74/84）且开启三种自选身份模式之一时显示。 */
+export function shouldRevealIdentityFigures(input: {
+  modeText: string;
+  modeType?: number;
+  chooseFigure: boolean;
+}): boolean {
+  const drill = input.modeText.includes('演武')
+    || input.modeType === 74
+    || input.modeType === 84;
+  const custom = input.chooseFigure
+    || /自选身份|身份自选|自选反贼|反贼自选|自选主忠|主忠自选/.test(input.modeText);
+  return drill && custom;
+}
+
+function readSeatListLength(room: UnknownRecord | null): number {
+  const seats = asRecord(room?.TabbleSeatInfos)
+    ?? asRecord(room?.tabbleSeatInfos)
+    ?? asRecord(room?.TableSeatInfos)
+    ?? asRecord(room?.tableSeatInfos);
+  if (!seats) return 0;
+  const raw = seats.datum ?? seats.Datum ?? seats.list ?? seats.objs ?? seats;
+  return Array.isArray(raw) || (raw && typeof raw === 'object' && typeof (raw as { length?: unknown }).length === 'number')
+    ? Number((raw as { length: number }).length)
+    : 0;
+}
+
+/** 模式名可能只存在于游戏上下文或房间设置文字中。 */
+function readMode(
+  globalObject: GameRuntimeWindow,
+  room: UnknownRecord | null,
+  setting: UnknownRecord | null
+): { modeText: string; modeType: number; chooseFigure: boolean } {
+  const scene = asRecord(locateGameScene(globalObject));
+  const topMenu = asRecord(scene?.topMenu);
+  const area = asRecord(topMenu?.areaServerLabel);
+  const parts: unknown[] = [area?.text, scene?.modeName, scene?.ModeName];
+  const context = createLayaObjectLocator(globalObject).gameContext()
+    ?? asRecord((globalObject as unknown as UnknownRecord).GameContext);
+  let modeType = 0;
+  try {
+    const getModeVo = context?.GetModeVO;
+    const vo = typeof getModeVo === 'function' ? asRecord(getModeVo.call(context)) : null;
+    const getModeType = context?.GetModeType;
+    const rawModeType = vo?.ModeType ?? vo?.modeType
+      ?? (typeof getModeType === 'function' ? getModeType.call(context) : 0);
+    modeType = Number(rawModeType) || 0;
+    parts.push(
+      vo?.ModeName, vo?.modeName, vo?.Name, vo?.name,
+      vo?.SectionName, vo?.sectionName, vo?.ModelName, vo?.modelName,
+      vo?.SectionDesc, vo?.Desc, vo?.desc
+    );
+  } catch {
+    // 模式名读失败时继续看房间设置里的文字。
+  }
+  collectChinese(setting, parts);
+  collectChinese(room, parts);
+  return {
+    modeText: parts.filter((part): part is string => typeof part === 'string').join(' '),
+    modeType,
+    chooseFigure: isChooseFigure(setting)
+  };
+}
+
+function collectChinese(record: UnknownRecord | null, parts: unknown[]): void {
+  if (!record) return;
+  for (const value of Object.values(record)) {
+    if (typeof value === 'string' && /[\u4e00-\u9fff]/.test(value)) parts.push(value);
+  }
+}
+
+function createDebugState(globalObject: GameRuntimeWindow): ChooseFigureDebugState {
+  const host = globalObject as unknown as UnknownRecord;
+  const existing = asRecord(host[DEBUG_KEY]);
+  if (existing && Array.isArray(existing.history)) return existing as unknown as ChooseFigureDebugState;
+  const state: ChooseFigureDebugState = {
+    enabled: true,
+    history: [],
+    last: null,
+    clear() { state.history.length = 0; state.last = null; }
+  };
+  host[DEBUG_KEY] = state;
+  return state;
+}
+
+function recordDebug(state: ChooseFigureDebugState, entry: Record<string, unknown>): void {
+  const record = { at: new Date().toISOString(), ...entry };
+  state.last = record;
+  state.history.push(record);
+  if (state.history.length > 100) state.history.splice(0, state.history.length - 100);
+}
+
+/** 读取房间标识，防止同一页面切到另一房间时沿用旧账号顺序。 */
+function readRoomKey(room: UnknownRecord | null): string {
+  if (!room) return '';
+  for (const key of ['RoomID', 'RoomId', 'roomID', 'roomId', 'TableID', 'TableId', 'tableId', 'RoomNo']) {
+    const value = room[key];
+    if (value === null || value === undefined || value === '') continue;
+    return String(value);
+  }
+  return '';
 }
 
 /** 自选身份开关。桌子上可能是布尔，也可能是 1。 */
 export function isChooseFigure(setting: UnknownRecord | null): boolean {
   if (!setting) return false;
-  const value = setting.IsChooseFigure ?? setting.isChooseFigure ?? setting.ChooseFigure ?? setting.chooseFigure;
-  return value === true || value === 1 || value === '1';
+  const identityModeKey = /(?:choose|select).*(figure|identity|rebel|lord|loyal|zhong|fan|zhu|role)|(?:figure|identity|rebel|lord|loyal|zhong|fan|zhu|role).*(?:choose|select)/i;
+  return Object.entries(setting).some(([key, value]) => identityModeKey.test(key)
+    && (value === true || value === 1 || value === '1'));
+}
+
+function readIdentitySettingSnapshot(setting: UnknownRecord | null): Record<string, unknown> {
+  if (!setting) return {};
+  return Object.fromEntries(Object.entries(setting)
+    .filter(([key, value]) => /choose|select|figure|identity|rebel|lord|loyal|zhong|fan|zhu|role/i.test(key)
+      && ['string', 'number', 'boolean'].includes(typeof value)));
 }
 
 /** 房间单例没有固定入口，按管理器列表、类名和事件监听者依次找。 */
@@ -194,6 +397,26 @@ function readDatumClientId(value: unknown): string {
 function readSeatClientId(seat: UnknownRecord | null): string {
   const info = asRecord(seat?.playerInfo) ?? asRecord(seat?.PlayerInfo) ?? seat;
   return normalizeId(info?.ClientId ?? info?.clientId ?? info?.ClientID);
+}
+
+function readSeatId(seat: UnknownRecord | null): number | null {
+  if (!seat) return null;
+  for (const key of ['seatID', 'seatId', 'SeatID', 'SeatId', 'index', 'Index']) {
+    const value = Number(seat[key]);
+    if (Number.isInteger(value) && value >= 0 && value < 0xff) return value;
+  }
+  return null;
+}
+
+/** 调试记录只保留账号编号的稳定短指纹，不写出原始 ClientId。 */
+function clientToken(value: string): string {
+  if (!value) return '';
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
 }
 
 function normalizeId(value: unknown): string {

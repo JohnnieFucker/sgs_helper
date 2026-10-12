@@ -88,7 +88,20 @@ export default defineConfig({
           '*://game.4399iw2.com/yxsgs/*',
           '*://my.4399.com/yxsgs/*',
           '*://*.sanguosha.com/*',
-          '*://web.kuaiwan.com/kwsgsn/*'
+          '*://web.kuaiwan.com/kwsgsn/*',
+          '*://wan.baidu.com/microend?gameId=19793595*',
+          '*://www.7k7k.com/special/sgs/?*',
+          '*://playgame.iqiyi.com/login/iframe_page_web/top?game_id=146'
+        ],
+        exclude: [
+          'https://game.4399iw2.com/yxxsgs/*',
+          '*://*.sanguosha.com/10/*',
+          '*://*.sanguosha.com/10th/*',
+          '*://*.sanguosha.com/220/miniGame/*',
+          'https://wan.baidu.com/*gameId=19793616*',
+          '*://h5.7k7k.com/web/H5GAMES.html?gid=960982bec2f555de44ea43ca8a7ef418/*',
+          '*://qqgame.qq.com/webappframe/?appid=10951',
+          '*://s118.app1107877410.qqopenapp.com/pc/qqLobby_index.php*'
         ],
         grant: 'none',
         'run-at': 'document-start',

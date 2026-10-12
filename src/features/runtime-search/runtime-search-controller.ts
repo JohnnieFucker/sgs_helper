@@ -41,7 +41,6 @@ interface BagSearchState extends SearchState {
 
 interface GeneralPoolSearchState extends SearchState {
   keyword: string;
-  originalUpdateItems: PatchableFunction;
   originalLayout?: PatchableFunction;
   placeSearch(): void;
 }
@@ -213,8 +212,7 @@ function attachGeneralPoolSearch(
     existing.placeSearch();
     return;
   }
-  const updateItemsName = resolvePoolUpdateItemsName(poolWindow);
-  if (!updateItemsName) return;
+  if (typeof poolWindow.getGeneralListByValue !== 'function' || typeof poolWindow.updateList !== 'function') return;
   const search = createSearchInput(globalObject, '搜索武将', 170, 24);
   if (!search) return;
   search.container.name = 'xiaochao-general-pool-search-container';
@@ -222,14 +220,12 @@ function attachGeneralPoolSearch(
   const searchHost = asRecord(poolWindow.contentSprite) ?? poolWindow;
   searchHost.addChild?.(search.container);
 
-  const originalUpdateItems = poolWindow[updateItemsName] as PatchableFunction;
   const originalLayout = typeof poolWindow.layout === 'function'
     ? poolWindow.layout as PatchableFunction
     : undefined;
   const state: GeneralPoolSearchState = {
     ...search,
     keyword: '',
-    originalUpdateItems,
     originalLayout,
     placeSearch: () => undefined,
     dispose: () => undefined
@@ -251,11 +247,15 @@ function attachGeneralPoolSearch(
   state.placeSearch = placeSearch;
   placeSearch();
 
-  poolWindow[updateItemsName] = function (...args: unknown[]) {
-    if (!state.keyword) return state.originalUpdateItems.apply(this, args);
-    const generals = Array.isArray(args[1]) ? args[1] : [];
-    return state.originalUpdateItems.call(this, args[0], filterGenerals(generals, state.keyword), ...args.slice(2));
-  };
+  const originalGetList = poolWindow.getGeneralListByValue as PatchableFunction;
+  if (typeof originalGetList === 'function') {
+    poolWindow.getGeneralListByValue = function (this: UnknownRecord, ...args: unknown[]) {
+      const list = originalGetList.apply(this, args);
+      const current = this[GENERAL_POOL_STATE_KEY] as GeneralPoolSearchState | undefined;
+      if (!current?.keyword || !Array.isArray(list)) return list;
+      return filterGenerals(list, current.keyword);
+    };
+  }
   if (originalLayout) {
     poolWindow.layout = function (...args: unknown[]) {
       const result = state.originalLayout?.apply(this, args);
@@ -265,26 +265,22 @@ function attachGeneralPoolSearch(
   }
 
   const refresh = debounce(globalObject, () => {
-    state.keyword = normalizeKeyword(state.input.text);
-    const selectedIndex = poolWindow.tabGroup?.selectedIndex
-      ?? poolWindow.tabGroup?.selected
-      ?? 0;
-    if (typeof poolWindow.tabClicked === 'function') {
-      poolWindow.tabClicked(selectedIndex);
-      return;
-    }
-    poolWindow[updateItemsName]?.();
+    state.keyword = normalizeKeyword(readInputText(state.input));
+    poolWindow.updateList();
   }, 100);
   const inputEvent = String(globalObject.Laya?.Event?.INPUT ?? 'input');
+  const changeEvent = String(globalObject.Laya?.Event?.CHANGE ?? 'change');
   const enterEvent = String(globalObject.Laya?.Event?.ENTER ?? 'enter');
   state.input.on?.(inputEvent, poolWindow, refresh);
+  if (changeEvent !== inputEvent) state.input.on?.(changeEvent, poolWindow, refresh);
   state.input.on?.(enterEvent, poolWindow, refresh);
   state.dispose = () => {
     state.input.off?.(inputEvent, poolWindow, refresh);
+    if (changeEvent !== inputEvent) state.input.off?.(changeEvent, poolWindow, refresh);
     state.input.off?.(enterEvent, poolWindow, refresh);
     refresh.cancel();
-    if (poolWindow[updateItemsName] !== originalUpdateItems) {
-      poolWindow[updateItemsName] = originalUpdateItems;
+    if (poolWindow.getGeneralListByValue !== originalGetList) {
+      poolWindow.getGeneralListByValue = originalGetList;
     }
     if (originalLayout && poolWindow.layout !== originalLayout) {
       poolWindow.layout = originalLayout;
@@ -295,14 +291,6 @@ function attachGeneralPoolSearch(
   };
   poolWindow[GENERAL_POOL_STATE_KEY] = state;
   activeStates.add(state);
-}
-
-/** 解析将池窗口用于刷新列表的方法名。 */
-function resolvePoolUpdateItemsName(poolWindow: UnknownRecord): string | null {
-  for (const name of ['updateItems', 'UpdateItems', 'updateGeneralItems']) {
-    if (typeof poolWindow[name] === 'function') return name;
-  }
-  return null;
 }
 
 /** 创建 Laya 搜索输入框与容器节点。 */
@@ -355,23 +343,30 @@ function filterBagItems(items: unknown[], keyword: string): unknown[] {
 
 function filterGenerals(items: unknown[], keyword: string): unknown[] {
   if (!keyword) return items;
-  return items.filter((item) => {
-    const record = asRecord(item);
-    return searchableText(
-      record,
-      asRecord(record?.baseInfo),
-      asRecord(record?.general),
-      asRecord(record?.generalVo),
-      asRecord(record?.vo),
-      asRecord(record?.data)
-    ).includes(keyword);
-  });
+  return items.filter((item) => generalSearchText(item).includes(keyword));
+}
+
+function generalSearchText(item: unknown): string {
+  if (typeof item === 'string' || typeof item === 'number') return String(item).toLocaleLowerCase();
+  const record = asRecord(item);
+  if (!record) return '';
+  return [
+    record,
+    asRecord(record.baseInfo),
+    asRecord(record.general),
+    asRecord(record.generalVo),
+    asRecord(record.generalInfo),
+    asRecord(record.info),
+    asRecord(record.vo),
+    asRecord(record.data)
+  ].map((entry) => searchableText(entry)).join('');
 }
 
 function searchableText(...records: Array<UnknownRecord | null>): string {
   const fields = [
-    'specifyName', 'name', 'Name', 'cnName', 'generalName', 'GeneralName',
-    'showName', 'title', 'desc', 'description', 'id', 'Id', 'generalId', 'GeneralId'
+    'specifyName', 'trueSpecifyName', 'cardName', 'name', 'Name', 'cnName',
+    'generalName', 'GeneralName', 'generalname', 'showName', 'title',
+    'desc', 'description', 'id', 'Id', 'generalId', 'GeneralId', 'chrId', 'ChrId'
   ];
   return records.flatMap((record) => fields.map((field) => record?.[field]))
     .filter((value) => value !== undefined && value !== null)
@@ -380,6 +375,12 @@ function searchableText(...records: Array<UnknownRecord | null>): string {
 }
 
 /** 规范化搜索关键词（去空白、小写等）。 */
+function readInputText(input: SearchInput): unknown {
+  const native = asRecord(input.input) ?? asRecord(input._tf);
+  const nativeValue = native?.value ?? native?.text;
+  return nativeValue !== undefined && nativeValue !== null ? nativeValue : input.text;
+}
+
 function normalizeKeyword(value: unknown): string {
   return String(value ?? '').trim().toLocaleLowerCase();
 }

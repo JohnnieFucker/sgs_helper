@@ -1,13 +1,4 @@
 /**
- * 浏览器版小抄开始初始化前必须出现的游戏运行时对象。
- * 名称同时用于开发监控界面的 `startup.missing` 状态，便于判断卡在哪一步。
- */
-export const REQUIRED_GAME_RUNTIME_DEPENDENCIES = Object.freeze([
-  'SystemContext',
-  'bgDiv'
-]);
-
-/**
  * 检查游戏页面是否具备初始化小抄所需的全局对象和根节点。
  * PUERTS 模式使用另一套资源加载机制，因此无需等待浏览器版依赖。
  *

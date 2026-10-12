@@ -81,8 +81,7 @@ const gameCardCatalog = {
     suitGlyph: '',
     rank: '',
     isRed: false,
-    cardType: 0,
-    artworkUrl: ''
+    cardType: 0
   }),
   clear: () => {}
 } as unknown as GameCardCatalog;
