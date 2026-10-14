@@ -24,7 +24,8 @@ function normalizeCredentials(list) {
         const normalized = {
             account,
             password,
-            updatedAt: Number(item && item.updatedAt) || Date.now()
+            updatedAt: Number(item && item.updatedAt) || Date.now(),
+            remark: String(item && item.remark || '').trim().slice(0, 24)
         };
         const index = result.findIndex((entry) => entry.account === account);
         if (index >= 0) result[index] = normalized;

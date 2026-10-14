@@ -45,6 +45,18 @@ function run(command, args, cwd = root) {
   });
 }
 
+/** 打包时把版本号末位加 1 并写回，保证每次发布的 @version 不重复。 */
+function bumpProjectVersion() {
+  const pkgPath = path.join(root, 'package.json');
+  const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+  const parts = String(pkg.version || '0.0.0').split('.').map((value) => Number(value) || 0);
+  while (parts.length < 3) parts.push(0);
+  parts[2] += 1;
+  pkg.version = parts.slice(0, 3).join('.');
+  writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
+  return pkg.version;
+}
+
 function writeBundledScript(version) {
   const body = readFileSync(builtScript, 'utf8');
   const banner = [
@@ -69,6 +81,9 @@ async function main() {
   if (!existsSync(path.join(shellDir, 'main.js')) || !existsSync(path.join(shellDir, 'package.json'))) {
     throw new Error(`缺少发布壳目录 tools/release-app-shell（需含 main.js / package.json）`);
   }
+
+  const bumpedVersion = bumpProjectVersion();
+  console.log(`[pack] 版本号 +1 → v${bumpedVersion}`);
 
   console.log('[pack] 构建小抄脚本…');
   await run(process.execPath, [

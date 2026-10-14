@@ -664,21 +664,24 @@ function execute(webview) {
 
   function normalizeCredentials(list) {
     const merged = [];
-    const add = (account, password, updatedAt) => {
+    const add = (account, password, updatedAt, remark) => {
       account = String(account || '').trim();
       password = String(password || '');
+      const note = String(remark || '').trim();
       if (!account || !password) return;
       const old = merged.find((item) => item.account === account);
       if (old) {
         old.password = password;
         old.updatedAt = Math.max(old.updatedAt || 0, updatedAt || 0);
+        // 合并本地与共享两份时，别把已有的备注冲掉。
+        if (note) old.remark = note;
       } else {
-        merged.push({ account, password, updatedAt: updatedAt || 0 });
+        merged.push({ account, password, updatedAt: updatedAt || 0, remark: note });
       }
     };
 
     if (Array.isArray(list)) {
-      list.forEach((item) => add(item && item.account, item && item.password, item && item.updatedAt));
+      list.forEach((item) => add(item && item.account, item && item.password, item && item.updatedAt, item && item.remark));
     } else if (list && typeof list === 'object') {
       Object.keys(list).forEach((account) => add(account, list[account], 0));
     }
@@ -709,7 +712,8 @@ function execute(webview) {
     const modernList = normalized.map((item) => ({
       account: item.account,
       password: item.password,
-      updatedAt: item.updatedAt || Date.now()
+      updatedAt: item.updatedAt || Date.now(),
+      remark: item.remark || ''
     }));
     window.localStorage.setItem(getCredentialStoreKey(), JSON.stringify(modernList));
     if (window.xiaochaoStorage && typeof window.xiaochaoStorage.saveCredentials === 'function') {
@@ -781,8 +785,14 @@ function execute(webview) {
       '.sgsol-credential-empty{padding:12px 10px;color:#9f9381;font-size:13px}',
       '.sgsol-credential-row{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:8px 10px;cursor:pointer;border-bottom:1px solid rgba(255,255,255,.05)}',
       '.sgsol-credential-row:hover,.sgsol-credential-row.sgsol-active{background:rgba(145,96,40,.36)}',
-      '.sgsol-account-name{font-size:15px;line-height:20px;color:#f3ead5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+      '.sgsol-account-line{display:flex;align-items:baseline;gap:6px;min-width:0}',
+      '.sgsol-account-remark{flex:none;max-width:45%;overflow:hidden;text-overflow:ellipsis;color:#f0c987;font-size:13px;line-height:20px}',
+      '.sgsol-account-name{flex:1 1 auto;min-width:0;font-size:15px;line-height:20px;color:#f3ead5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
       '.sgsol-account-pass{font-size:12px;line-height:16px;color:#a99d89;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+      '.sgsol-row-actions{display:flex;align-items:center;gap:2px}',
+      '.sgsol-remark{width:22px;height:22px;border:0;background:transparent;color:#b6aa96;font-size:15px;line-height:20px;cursor:pointer}',
+      '.sgsol-remark:hover{color:#ffcf8a}',
+      '.sgsol-remark-input{flex:1 1 auto;min-width:0;box-sizing:border-box;border:1px solid rgba(226,199,137,.6);border-radius:3px;background:#1b1712;color:#f3ead5;padding:1px 6px;font-size:14px;line-height:20px;outline:none}',
       '.sgsol-delete{width:22px;height:22px;border:0;background:transparent;color:#b6aa96;font-size:18px;line-height:20px;cursor:pointer}',
       '.sgsol-delete:hover{color:#ffcf8a}',
       '.sgsol-save-line{position:fixed;z-index:2147483599;display:inline-flex;align-items:center;gap:6px;margin-left:0;color:#cfc4b2;font-size:15px;line-height:20px;cursor:pointer;vertical-align:middle;user-select:none;white-space:nowrap}',
@@ -857,14 +867,29 @@ function execute(webview) {
       const password = parts.password.value;
       if (!account || !password) return false;
       const item = { account, password, updatedAt: Date.now() };
-      const existing = userlist.findIndex((item) => item.account === account);
-      if (existing >= 0) userlist[existing] = item;
+      const existing = userlist.findIndex((entry) => entry.account === account);
+      // 重新保存同一个账号时保留原来写好的备注。
+      if (existing >= 0) userlist[existing] = { ...item, remark: userlist[existing].remark || '' };
       else userlist.unshift(item);
       saveList(userlist);
       renderPanel();
       saveCheckbox.checked = true;
       setSaveHint('已保存');
       return true;
+    }
+
+    /** 写备注：空字符串表示清除。 */
+    function setRemark(index, remark) {
+      const item = userlist[index];
+      if (!item) return;
+      const note = String(remark || '').trim().slice(0, 24);
+      if ((item.remark || '') === note) {
+        renderPanel();
+        return;
+      }
+      item.remark = note;
+      saveList(userlist);
+      renderPanel();
     }
 
     function removeCredential(index) {
@@ -891,7 +916,50 @@ function execute(webview) {
     function getFilteredList() {
       const keyword = accountFilterKeyword;
       if (!keyword) return userlist;
-      return userlist.filter((item) => String(item.account || '').toLowerCase().includes(keyword));
+      // 备注一起参与筛选，方便按备注找人。
+      return userlist.filter((item) => String(item.account || '').toLowerCase().includes(keyword)
+        || String(item.remark || '').toLowerCase().includes(keyword));
+    }
+
+    /** 备注改成行内输入框：回车保存，Esc 取消，失焦按保存处理。 */
+    let remarkEditing = false;
+    function startRemarkEdit(row, index) {
+      if (remarkEditing) return;
+      const item = userlist[index];
+      const line = row.querySelector('.sgsol-account-line');
+      const nameNode = row.querySelector('.sgsol-account-name');
+      if (!item || !line || !nameNode) return;
+      remarkEditing = true;
+      const input = loginDocument.createElement('input');
+      input.className = 'sgsol-remark-input';
+      input.type = 'text';
+      input.maxLength = 24;
+      input.placeholder = '备注，留空即清除';
+      input.value = item.remark || '';
+      line.replaceChild(input, nameNode);
+      input.focus();
+      input.select();
+      let finished = false;
+      const finish = (save) => {
+        if (finished) return;
+        finished = true;
+        remarkEditing = false;
+        if (save) setRemark(index, input.value);
+        else renderPanel();
+      };
+      input.addEventListener('keydown', (event) => {
+        event.stopPropagation();
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          finish(true);
+        } else if (event.key === 'Escape') {
+          event.preventDefault();
+          finish(false);
+        }
+      });
+      input.addEventListener('blur', () => finish(true));
+      input.addEventListener('mousedown', (event) => event.stopPropagation());
+      input.addEventListener('click', (event) => event.stopPropagation());
     }
 
     let positionFrame = 0;
@@ -967,7 +1035,12 @@ function execute(webview) {
         const row = loginDocument.createElement('div');
         row.className = 'sgsol-credential-row' + (filteredIndex === activeIndex ? ' sgsol-active' : '');
         row.dataset.index = String(realIndex);
-        row.innerHTML = '<div><div class="sgsol-account-name"></div><div class="sgsol-account-pass"></div></div><button class="sgsol-delete" title="删除" type="button">×</button>';
+        row.innerHTML = '<div><div class="sgsol-account-line"><span class="sgsol-account-remark"></span><span class="sgsol-account-name"></span></div><div class="sgsol-account-pass"></div></div>'
+          + '<div class="sgsol-row-actions"><button class="sgsol-remark" title="备注" type="button">✎</button><button class="sgsol-delete" title="删除" type="button">×</button></div>';
+        const remarkNode = row.querySelector('.sgsol-account-remark');
+        const remark = String(item.remark || '');
+        remarkNode.textContent = remark;
+        remarkNode.hidden = !remark;
         row.querySelector('.sgsol-account-name').textContent = item.account || '';
         row.querySelector('.sgsol-account-pass').textContent = maskPassword(item.password);
         panel.appendChild(row);
@@ -1022,14 +1095,24 @@ function execute(webview) {
       return true;
     }
 
-    panel.addEventListener('mousedown', (event) => event.preventDefault());
+    panel.addEventListener('mousedown', (event) => {
+      // 备注输入框要拿到焦点，不能拦掉默认行为。
+      if (event.target.closest('.sgsol-remark-input')) return;
+      event.preventDefault();
+    });
     panel.addEventListener('click', (event) => {
       const deleteButton = event.target.closest('.sgsol-delete');
+      const remarkButton = event.target.closest('.sgsol-remark');
       const row = event.target.closest('.sgsol-credential-row');
       if (!row) return;
       const index = Number(row.dataset.index);
       if (deleteButton) {
         removeCredential(index);
+        event.stopPropagation();
+        return;
+      }
+      if (remarkButton) {
+        startRemarkEdit(row, index);
         event.stopPropagation();
         return;
       }

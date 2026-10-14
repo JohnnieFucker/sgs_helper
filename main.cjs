@@ -153,9 +153,10 @@ async function createWindow() {
 
     // Create the browser window.
     console.log("createWindow");
+    const savedSize = readSavedWindowSize();
     mainWindow = new BrowserWindow({
-        width: config.get('width', 1400),
-        height: config.get('height', 820),
+        width: savedSize.width,
+        height: savedSize.height,
         frame: false,
         resizable: true,
         titleBarStyle: 'customButtonOnHover',
@@ -224,6 +225,18 @@ async function createWindow() {
 
         mainWindow.webContents.send('resize', 1);
         //crashReporter.addExtraParameter("whlie", "main");
+    })
+
+    // 记住这次拖出来的窗口大小，下次打开照这个尺寸开。
+    mainWindow.on('resize', function () {
+        scheduleSaveWindowSize(mainWindow);
+    })
+    mainWindow.on('close', function () {
+        if (saveWindowSizeTimer) {
+            clearTimeout(saveWindowSizeTimer);
+            saveWindowSizeTimer = null;
+        }
+        saveWindowSizeNow(mainWindow);
     })
 
     mainWindow.on('enter-full-screen', function () {
@@ -918,6 +931,97 @@ function changeChannel(window, isSave = false) {
     changePackage(window, isSave);
 }
 
+/**
+ * 分辨率档位：和旧版一致，弹框里按这个顺序列。
+ * 改完立刻生效，并写进配置当下次启动的默认分辨率。
+ */
+const WINDOW_SIZE_PRESETS = [
+    { width: 1500, height: 820 },
+    { width: 1340, height: 700 },
+    { width: 1400, height: 820 }
+];
+/** 窗口大小的下限；再小游戏页面会被挤坏。 */
+const WINDOW_MIN_SIZE = { width: 1024, height: 600 };
+/** 缩放过程中会连续触发 resize，攒一下再写盘。 */
+let saveWindowSizeTimer = null;
+
+function clampWindowSize(value, min, max) {
+    const number = Math.round(Number(value));
+    if (!Number.isFinite(number) || number <= 0) return min;
+    return Math.min(Math.max(number, min), max);
+}
+
+/**
+ * 上次的窗口大小。换了小屏或改了缩放比例时，存下来的尺寸可能比工作区还大，
+ * 直接用它开窗会有一部分跑到屏幕外，所以按当前工作区夹一遍。
+ */
+function readSavedWindowSize() {
+    const fallback = { width: 1400, height: 820 };
+    const area = screen.getPrimaryDisplay().workAreaSize;
+    return {
+        width: clampWindowSize(config.get('width', fallback.width), WINDOW_MIN_SIZE.width,
+            Math.max(WINDOW_MIN_SIZE.width, Math.round(area.width))),
+        height: clampWindowSize(config.get('height', fallback.height), WINDOW_MIN_SIZE.height,
+            Math.max(WINDOW_MIN_SIZE.height, Math.round(area.height)))
+    };
+}
+
+/** 立刻把当前窗口大小写进配置；最大化和全屏时记的是屏幕尺寸，跳过。 */
+function saveWindowSizeNow(window) {
+    if (!window || window.isDestroyed()) return;
+    if (window.isMaximized() || window.isFullScreen()) return;
+    const bounds = window.getBounds();
+    if (!Number.isFinite(bounds.width) || !Number.isFinite(bounds.height)) return;
+    if (bounds.width <= 0 || bounds.height <= 0) return;
+    if (config.get('width', 0) === bounds.width && config.get('height', 0) === bounds.height) return;
+    config.set('width', bounds.width);
+    config.set('height', bounds.height);
+}
+
+/** 拖完窗口再存，避免 resize 过程中反复写文件。 */
+function scheduleSaveWindowSize(window) {
+    if (saveWindowSizeTimer) clearTimeout(saveWindowSizeTimer);
+    saveWindowSizeTimer = setTimeout(() => {
+        saveWindowSizeTimer = null;
+        saveWindowSizeNow(window);
+    }, 500);
+}
+
+/**
+ * 弹框选择分辨率并持久化，立即 setBounds。
+ * 同时通知页面里的游戏改 SystemContext 的最小分辨率，保持和窗口一致。
+ */
+function resizeWindow(window) {
+    if (!window) return;
+    const current = window.getBounds();
+    const defaultId = Math.max(0, WINDOW_SIZE_PRESETS.findIndex(
+        (size) => size.width === current.width && size.height === current.height
+    ));
+    dialog.showMessageBox(window, {
+        type: 'warning',
+        title: '提示',
+        message: '修改分辨率，并默认下次打开微端时使用该分辨率',
+        buttons: WINDOW_SIZE_PRESETS.map((size) => `${size.width}*${size.height}`).concat('cancel'),
+        defaultId,
+        cancelId: WINDOW_SIZE_PRESETS.length
+    }).then((data) => {
+        const size = WINDOW_SIZE_PRESETS[data.response];
+        if (!size) return;
+        config.set('width', size.width);
+        config.set('height', size.height);
+        if (saveWindowSizeTimer) {
+            clearTimeout(saveWindowSizeTimer);
+            saveWindowSizeTimer = null;
+        }
+        window.setBounds({ width: size.width, height: size.height });
+        try {
+            window.webContents.send('rendererMsg', 'changeSize', `${size.width}*${size.height}`);
+        } catch (error) {
+            console.warn('通知页面改分辨率失败:', error);
+        }
+    });
+}
+
 /** 首次启动或手动查看时展示微端功能说明。 */
 function firstTimeAnnouncement(window, manual = false) {
     if (!window) return;
@@ -929,7 +1033,7 @@ function firstTimeAnnouncement(window, manual = false) {
             '2. 多大区切换和默认大区保存\n' +
             '3. 账号密码本地记住与快速填充\n' +
             '4. 自定义背景/动态背景\n' +
-            '5. 全屏适配、右键/左上角功能菜单\n\n' +
+            '5. 分辨率保存、全屏适配、右键/左上角功能菜单\n\n' +
             '账号密码只保存在本机微端用户数据目录中，请勿在公共电脑使用“记住账号密码”。',
         buttons: manual ? ['ok'] : ['我知道了', '退出']
     }).then((index) => {
@@ -942,11 +1046,12 @@ function firstTimeAnnouncement(window, manual = false) {
     });
 }
 
-/** 右键菜单：切大区、默认大区、说明、版本号。 */
+/** 右键菜单：切大区、默认大区、分辨率、说明、版本号。 */
 function createContextMenu() {
     return Menu.buildFromTemplate([
         { label: '切换游戏大区', click: () => changeChannel(mainWindow, false) },
         { label: '选择默认游戏大区', click: () => changePackage(mainWindow, true) },
+        { label: '修改分辨率', click: () => resizeWindow(mainWindow) },
         { label: '查看微端说明', click: () => firstTimeAnnouncement(mainWindow, true) },
         { type: 'separator' },
         { label: `微端版本 ${package.version}`, enabled: false }
