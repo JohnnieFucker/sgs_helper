@@ -115,6 +115,9 @@ function resolveSpellIdsByName(
 ): number[] {
   if (!spellNames.length || !scene) return [];
   const nameSet = new Set(spellNames);
+  const wantedNames = spellNames.filter((name) => name.length >= 2);
+  const matchesName = (name: string): boolean => nameSet.has(name)
+    || wantedNames.some((want) => name.includes(want));
   const dict = findSpellDict(scene);
   if (!dict) return fallbackSpellLookup ? spellNames.flatMap((name) => fallbackSpellLookup!(name)) : [];
   const ids: number[] = [];
@@ -127,7 +130,7 @@ function resolveSpellIdsByName(
         : typeof rawValue === 'string'
           ? rawValue
           : '';
-    if (!nameSet.has(name)) continue;
+    if (!matchesName(name)) continue;
     const id = Number(record?.id ?? record?.ID ?? record?.spellId ?? rawKey);
     if (Number.isInteger(id) && id > 0) ids.push(id);
   }

@@ -13,6 +13,8 @@ export type GameEvent =
   }
   | {
     type: 'game-ended';
+    /** 本局已经结算。断线、离桌和场景重建不算结算，身份锁定要留着。 */
+    settled?: boolean;
   }
   | { type: 'game-reconnected' }
   | { type: 'deck-shuffled' }
@@ -184,7 +186,11 @@ function normalizeGameEvent(event: GameEvent): Readonly<GameEvent> | null {
   if (!event || typeof event.type !== 'string') return null;
   if (event.type === 'game-started' || event.type === 'game-ended'
     || event.type === 'game-reconnected' || event.type === 'deck-shuffled') {
-    return Object.freeze({ type: event.type, ...(event.type === 'game-started' && event.freshGame ? { freshGame: true } : {}) });
+    return Object.freeze({
+      type: event.type,
+      ...(event.type === 'game-started' && event.freshGame ? { freshGame: true } : {}),
+      ...(event.type === 'game-ended' && event.settled ? { settled: true } : {})
+    });
   }
   if (event.type === 'spell-damage-resolved') {
     const seatId = normalizeSeatId(event.seatId);

@@ -11,24 +11,31 @@ const GLOBAL_OWNER = 0xff;
 
 /**
  * 用明牌引擎按卡号查找归属，把候选牌分成「手牌」与「牌堆」两组（宴戏面板求交用）。
+ * `deckTopCount` 给数字时，只有落在牌堆顶部这么多张之内的候选才算「牌堆侧」
+ * （旧版宴戏只看牌堆顶前两张，国战看整副牌堆）；未知槽位不参与判定。
  */
 export function partitionCandidatesByMingpai(
   engine: MingpaiEngine,
-  candidateIds: readonly number[]
+  candidateIds: readonly number[],
+  options: { deckTopCount?: number | null } = {}
 ): {
   handCardIds: number[];
   deckCardIds: number[];
 } {
   const handZonePrefix = `${HAND_ZONE}-`;
   const deckZoneId = formatZoneId(GLOBAL_OWNER, DRAW_PILE_ZONE);
+  const deckTopKeys = typeof options.deckTopCount === 'number'
+    ? new Set(engine.getSnapshot().drawPile.top.slice(0, Math.max(0, options.deckTopCount)).filter(Boolean))
+    : null;
   const handCardIds: number[] = [];
   const deckCardIds: number[] = [];
 
   for (const cardId of uniquePositive(candidateIds)) {
-    const { zones } = engine.findKZ(cardId);
+    const { keys, zones } = engine.findKZ(cardId);
     const inHand = zones.some((zone) => zone.startsWith(handZonePrefix));
-    const inDeck = zones.includes(deckZoneId)
-      || zones.some((zone) => zone.startsWith(`${DRAW_PILE_ZONE}-`));
+    const inDeck = deckTopKeys
+      ? keys.some((key) => deckTopKeys.has(key))
+      : zones.includes(deckZoneId) || zones.some((zone) => zone.startsWith(`${DRAW_PILE_ZONE}-`));
     if (inHand) handCardIds.push(cardId);
     if (inDeck) deckCardIds.push(cardId);
   }

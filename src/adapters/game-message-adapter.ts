@@ -51,6 +51,9 @@ export function translateGameMessages(rawArguments: unknown[]): GameEvent[] {
   }
   if (className === 'MsgReconnectGame') return [{ type: 'game-reconnected' }];
   if (/shuffle|reshuffle|洗牌/i.test(className)) return [{ type: 'deck-shuffled' }];
+  if (className === 'MsgGameOver' || className === 'decodeMsgGameOver') {
+    return [{ type: 'game-ended', settled: true }];
+  }
   if (GAME_OVER_MESSAGE_NAMES.has(className)) return [{ type: 'game-ended' }];
   if (className === 'GsCUpdateHpNtf') {
     const event = translateSpellDamage(payload);
@@ -311,7 +314,7 @@ function isEmptyList(value: unknown): boolean {
 /**
  * GsCRoleOptTargetNtf：SeatID=操作者，SrcSeatID=施法者，
  * targetSeatID=被看座位（255=牌堆），Param/Params 含义由技能决定。
- * 这里只搬字段，不解释；解释在 mingpai/rules/opt-target-rules.ts。
+ * 这里只搬字段，不解释；解释在 mingpai/obfuscated-judge.ts。
  */
 function translateOptTarget(payload: UnknownRecord): GameEvent | null {
   const spellId = readNonNegativeInteger(payload, ['SpellID', 'SpellId', 'spellID', 'spellId']);

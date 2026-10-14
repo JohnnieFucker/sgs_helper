@@ -23,7 +23,7 @@ const settings = [
   {
     key: 'display.deckRecordEnabled',
     label: '牌堆记录',
-    tooltip: '在常规页显示牌堆顶、牌堆底与本回合弃牌',
+    tooltip: '在常规页显示本回合弃牌',
   },
   {
     key: 'display.cardLabelsEnabled',

@@ -17,6 +17,7 @@ import { createConfigStore } from '../config/config-store';
 import { createPlatformConfigStorage } from '../config/config-storage';
 import { installSeatDisplayVisibility } from '../features/seat-display/seat-display-visibility';
 import { createSeatStateStore } from '../features/seat-display/seat-state-store';
+import { isNationWarMode } from '../features/seat-display/seat-state';
 import { installSeatStateController } from '../features/seat-display/seat-state-controller';
 import { createGameEventBus } from '../runtime/game-event-bus';
 import { createRecentCardStore } from '../features/recent-cards/recent-card-store';
@@ -110,6 +111,9 @@ export function bootstrapXiaochao(platform: PlatformAdapter): void {
       },
       getSeatLabel(seatId) {
         return seatStateStore.getSnapshot().seats.find((seat) => seat.seatId === seatId)?.playerName ?? '';
+      },
+      isNationWar() {
+        return isNationWarMode(seatStateStore.getSnapshot().mode);
       }
     }
   );

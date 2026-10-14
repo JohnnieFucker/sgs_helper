@@ -17,24 +17,29 @@ import {
 } from './mingpai-engine.ts';
 import { MINGPAI_ZONE } from './mingpai-zones.ts';
 import { applyCardReveals } from './reveal-sink.ts';
-import { resolveOptTargetReveals } from './rules/opt-target-rules.ts';
+import {
+  correctMoveCard,
+  getObfuscated3483PileCount,
+  isObfuscatedSameZoneShow,
+  judgeOptTarget,
+  judgeSpellOpt,
+  noteObfuscatedCurrentSeat,
+  noteObfuscatedSeatColor,
+  noteObfuscatedUseSpell,
+  resetObfuscatedJudge,
+  takeHiddenZoneCards,
+  takeQiDiscardCards
+} from './obfuscated-judge.ts';
 import { isXinyouCardGain, XINYOU_TAG, xinyouTagExpires } from './xinyou-tag.ts';
+import {
+  advanceSeatGridTrace,
+  advanceUniqueSeatGridTrace,
+  clearTempZoneGrids
+} from './graph/temporary-zone-grid.ts';
 import { locateGameScene } from '../seat-display/game-scene-locator.ts';
 import { resolveSkillIds } from '../skill-assist/skill-visibility.ts';
 import { traceMingpai } from '../../runtime/mingpai-trace.ts';
-import { resolveSpellOptRepReveals } from './rules/spell-opt-rep-rules.ts';
-import {
-  isIgnoredMove,
-  isInitialPileLoad,
-  isSameZoneShow,
-  isWholeHandMove,
-  normalizeMoveCardIds,
-  remapDrawPileFromPosition,
-  remapDrawPileToPosition,
-  sanitizeMoveCardIds
-} from './rules/move-card-rules.ts';
 import { legacyIncomingHandLabel } from './rules/legacy-hand-label.ts';
-import { createSpecialSpellRecovery } from './special-spell-recovery.ts';
 import { DRAW_PILE_OWNER } from './rules/reveal-types.ts';
 
 type MoveCardEvent = Extract<GameEvent, { type: 'cards-moved' }>;
@@ -58,23 +63,7 @@ export function installMingpaiController(
   { engine: injected, isRedCard = () => null, cardType = () => 0 }: MingpaiControllerOptions = {}
 ): { dispose: () => void; engine: MingpaiEngine } {
   const engine = injected ?? createMingpaiEngine();
-  const specialRecovery = createSpecialSpellRecovery({
-    hand(seatId) {
-      const seat = seatStateStore.getSnapshot().seats.find((entry) => entry.seatId === seatId);
-      return {
-        known: seat?.knownCards.map((card) => card.cardId).filter((cardId) => cardId > 0) ?? [],
-        unknownCount: seat?.unknownCardCount ?? 0
-      };
-    },
-    zoneCardIds: (seatId, zone) => engine.getZoneCardIds(formatZoneId(seatId, zone)),
-    isControlledSeat: (seatId) => isControlledSeat(seatId),
-    isRedCard,
-    isJiaoyuSpell
-  });
-  const temporaryCardZones = new Map<string, TemporaryCardZone>();
-  let temporaryZoneSequence = 0;
   const activeQiSeats = new Set<number>();
-  const pendingSpellCardClues: SpellCardClue[] = [];
   const eligibleQiKillersByVictim = new Map<number, Set<number>>();
   let pendingQiDeath: { victimSeatId: number; killerSeatId: number | null } | null = null;
   let pendingQiTransfer: {
@@ -88,6 +77,8 @@ export function installMingpaiController(
   let synchronizingPersistentTags = false;
   /** 重连包没有牌序快照，等座位场景公开手牌后再登记一次。 */
   let reconnectNeedsHands = false;
+  /** 本局的整副牌，断线重建时用。 */
+  let lastCardList: number[] = [];
 
   const unsubscribeSeatState = seatStateStore.subscribe((snapshot) => {
     if (synchronizingPersistentTags) return;
@@ -124,37 +115,49 @@ export function installMingpaiController(
       return;
     }
     const event = rawEvent;
-    specialRecovery.observe(event);
     if (event.type === 'deck-shuffled') {
-      dropUntrustedOrder();
+      // 真洗牌由移牌管线的「2 区 → 9 区」分支处理，它会把牌堆整堆打回未知。
+      // 这里按类名匹配的洗牌事件范围太宽（换一张牌到牌堆顶也会命中），
+      // 再清一次会把刚记住的顶牌抹掉，所以不再动牌堆顺序。
       return;
     }
     if (event.type === 'game-reconnected') {
+      // 断线后一切都要重建：牌堆顺序、判定纠偏、炁的转移状态、牌面标签全部丢掉，
+      // 再按本局总牌表把整副牌当作牌堆里的未知牌，最后用场上仍公开的手牌归位。
       dropUntrustedOrder();
+      resetObfuscatedJudge();
+      resetQiTransferState();
+      seatStateStore.resetKnownHands();
+      if (lastCardList.length) engine.resetAllCardsToDrawPile(lastCardList);
       reconnectNeedsHands = true;
       reconcileHandsFromScene();
       return;
     }
     if (event.type === 'game-ended') {
+      resetObfuscatedJudge();
       // 同房间结算/再开不切场景，只能靠协议清空；不要 store.clear() 把 inGame 打成 false，
       // 否则下一帧场景轮询又会当成新的 game-started，并把残留 CardUi 写回引擎。
-      temporaryCardZones.clear();
-      temporaryZoneSequence = 0;
+      clearTempZoneGrids();
       engine.clear();
+      engine.noteGameSettled();
       resetQiTransferState();
       seatStateStore.resetKnownHands();
       return;
     }
     if (event.type === 'game-started') {
       // 开局一律丢掉上一局缓存。热重载恢复只留给 game-reconnected。
-      temporaryCardZones.clear();
-      temporaryZoneSequence = 0;
+      resetObfuscatedJudge();
+      clearTempZoneGrids();
       resetQiTransferState();
+      lastCardList = [];
       engine.clear();
       seatStateStore.resetKnownHands();
       return;
     }
     if (event.type === 'card-list-ready') {
+      // + 开局总牌表：整副牌各占一个未知槽位，之后的移牌把它们逐步归位。
+      lastCardList = [...event.cardIds];
+      engine.resetAllCardsUnknown(lastCardList);
       traceMingpai('card-list', { count: event.cardIds.length, maxId: Math.max(...event.cardIds) });
       return;
     }
@@ -169,19 +172,25 @@ export function installMingpaiController(
       return;
     }
     if (event.type === 'temporary-cards-reordered') {
-      applyTemporaryCardReorder(event, temporaryCardZones);
+      // 技能临时区的层内顺序靠操作回报三元组推进；座位下只有一个未返完的追踪时直接接管。
+      const advanced = advanceSeatGridTrace(event.seatId, event.spellId, event.trace);
+      if (!advanced) advanceUniqueSeatGridTrace(event.seatId, event.trace);
       return;
     }
-    // 看牌协议 → 规则表解析 → 统一鉴定汇点
     if (event.type === 'opt-target') {
       const srcSeatId = event.srcSeatId ?? event.seatId;
-      const reveals = resolveOptTargetReveals({
+      const snapshot = seatStateStore.getSnapshot();
+      const reveals = judgeOptTarget({
         spellId: event.spellId,
         param: event.param,
         params: event.params,
+        cardIds: event.cardIds ?? [],
         srcSeatId,
         targetSeatId: event.targetSeatId,
-        isSelfSrc: isControlledSeat(srcSeatId)
+        optType: event.optType ?? null,
+        myId: snapshot.selfSeatId,
+        mySeats: snapshot.controlledSeatIds,
+        isHandLookSpell
       });
       traceMingpai('opt-target', {
         spellId: event.spellId, param: event.param, params: [...event.params], optType: event.optType ?? null,
@@ -191,13 +200,7 @@ export function installMingpaiController(
       return;
     }
     if (event.type === 'spell-opt-rep') {
-      const reveals = resolveSpellOptRepReveals({
-        spellId: event.spellId,
-        optType: event.optType,
-        seatId: event.seatId,
-        datas: event.datas,
-        isSelfSeat: isControlledSeat(event.seatId)
-      });
+      const reveals = judgeSpellOpt(event.spellId, event.optType, event.seatId, event.datas);
       traceMingpai('spell-opt-rep', {
         spellId: event.spellId, optType: event.optType, seatId: event.seatId,
         datas: [...event.datas], matchedReveals: reveals.length
@@ -205,8 +208,17 @@ export function installMingpaiController(
       applyCardReveals(reveals, engine, seatStateStore, `spell-opt-rep:${event.spellId}`);
       return;
     }
+    if (event.type === 'seat-state-changed' && event.stateId === 0xdf3) {
+      noteObfuscatedSeatColor(event.seatId, Math.trunc(event.value / 100));
+    }
     if (event.type === 'seat-state-changed' && event.stateId === QI_STATE_ID) {
       updateQiSeatState(event.seatId, event.value);
+      return;
+    }
+    if (event.type === 'spell-data-updated' && isJiaoyuSpell(event.dataId)) {
+      // 椒遇：技能私有数据第一位就是这个座位的判定颜色（1 红 / 2 黑）。
+      const color = Math.trunc(Number(event.datas[0]));
+      if (color === 1 || color === 2) noteObfuscatedSeatColor(event.seatId, color);
       return;
     }
     if (event.type === 'player-died') {
@@ -216,6 +228,7 @@ export function installMingpaiController(
     if (event.type === 'cards-used') {
       event.cardIds.filter((cardId) => cardId > 0).forEach(clearXinyouTag);
     }
+    if (event.type === 'phase-changed') noteObfuscatedCurrentSeat(event.seatId);
     if (event.type === 'phase-changed' && xinyouTagExpires(event.phase)) {
       clearAllXinyouTags();
     }
@@ -223,7 +236,14 @@ export function installMingpaiController(
       recordQiTransferSpell(event.seatId, event.targetSeatIds);
     }
     if (event.type === 'spell-targeted') {
-      rememberSpellCardClue(event);
+      noteObfuscatedUseSpell(
+        event.spellId,
+        event.seatId,
+        event.cardIds,
+        seatStateStore.getSnapshot().selfSeatId,
+        event.targetSeatIds,
+        event.effectIndex ?? null
+      );
       if (isXinyouSpell(event.spellId)) {
         xinyouCaster = { seatId: event.seatId, expiresAfterMovement: movementSequence + 8 };
       }
@@ -246,11 +266,8 @@ export function installMingpaiController(
 
   /** 断线或局面不可信时丢掉牌堆顺序和临时区，避免用旧顺序猜牌。 */
   function dropUntrustedOrder(): void {
-    temporaryCardZones.clear();
-    temporaryZoneSequence = 0;
-    pendingSpellCardClues.length = 0;
+    clearTempZoneGrids();
     xinyouCaster = null;
-    specialRecovery.clear();
     engine.clearKnownDrawPileOrder();
   }
 
@@ -270,6 +287,41 @@ export function installMingpaiController(
       };
     }));
     reconnectNeedsHands = false;
+  }
+
+  /** 座位展示名：优先武将名（国战双将用「丨」连），读不到回落「N号位」。 */
+  function readSeatLabel(seatId: number): string {
+    const generalName = readSeatGeneralName(seatId);
+    if (generalName) return generalName;
+    const seat = seatStateStore.getSnapshot().seats.find((entry) => entry.seatId === seatId);
+    const order = seat?.displayOrder ?? seatId + 1;
+    const numeral = '一二三四五六七八'[Math.max(0, order - 1)];
+    return `${numeral ?? order}号位`;
+  }
+
+  /** 从场景座位对象读武将名；主将副将都读不到就返回空串。 */
+  function readSeatGeneralName(seatId: number): string {
+    const scene = locateGameScene(window) as Record<string, unknown> | null;
+    if (!scene) return '';
+    const seatContainer = scene.seatContainer as { seatUIs?: unknown[] } | undefined;
+    const seatUis = [scene.SelfSeatUi, ...(seatContainer?.seatUIs ?? [])]
+      .filter((ui): ui is Record<string, unknown> => Boolean(ui) && typeof ui === 'object');
+    const seatUi = seatUis.find((ui) => Number(ui.seatID) === seatId);
+    const seat = seatUi?.seat as Record<string, unknown> | undefined;
+    if (!seat) return '';
+    const names: string[] = [];
+    for (const key of ['General', 'general', 'General2', 'general2']) {
+      const general = seat[key] as Record<string, unknown> | undefined;
+      if (!general || typeof general !== 'object') continue;
+      for (const nameKey of ['cardName', 'specifyName', 'trueSpecifyName', 'Name', 'name']) {
+        const value = general[nameKey];
+        if (typeof value === 'string' && value) {
+          names.push(value);
+          break;
+        }
+      }
+    }
+    return names.join('丨');
   }
 
   function isControlledSeat(seatId: number | null): boolean {
@@ -302,7 +354,7 @@ export function installMingpaiController(
 
   /**
    * 一次移牌。先丢掉半透明占位号，再按国战规则改牌堆顶底。
-   * 同区展示不换主人。其余移动先对技能线索，再记进临时区，最后能确定的牌写入引擎。
+   * 同区展示不换主人；其余移动先把能确定的牌尽量补上，落位交给明牌引擎。
    */
   function handleCardsMoved(rawEvent: MoveCardEvent): void {
     if (rawEvent.fromZone === HAND_ZONE && rawEvent.toZone === HAND_ZONE) {
@@ -315,88 +367,66 @@ export function installMingpaiController(
         cardIds: [...rawEvent.cardIds]
       };
       traceMingpai('hand-move-raw', handMoveTrace);
-      console.info('[明牌] 手牌移牌原始事件', handMoveTrace);
     }
     // 明牌专用纠偏：半透明卡号清空 + 牌堆顶/底纠偏。只影响明牌，不改总线原事件。
-    if (isIgnoredMove(rawEvent) || isInitialPileLoad(rawEvent)) return;
-    const sanitizedIds = sanitizeMoveCardIds(rawEvent.cardCount, normalizeMoveCardIds(rawEvent));
-    const fromPosition = remapDrawPileFromPosition(
-      { ...rawEvent, cardIds: sanitizedIds },
+    // 开局从区外铺进牌堆的移牌交给管线处理：它只往牌堆里补未知占位槽位，不会记成明牌。
+    const corrected = correctMoveCard(
+      { ...rawEvent, srcSeatId: rawEvent.srcSeatId ?? null },
       {
+        myId: seatStateStore.getSnapshot().selfSeatId,
         nationWar: isNationWarMode(seatStateStore.getSnapshot().mode),
-        cardType
+        cardType,
+        isRedCard,
+        isJudgeRecoverySpell: (spellId) => spellId === JUDGE_RECOVERY_SPELL_ID || isJiaoyuSpell(spellId),
+        zoneCardIds: (seatId, zone) => engine.getZoneCardIds(formatZoneId(seatId, zone)),
+        handCardIds: (seatId) => {
+          const seat = seatStateStore.getSnapshot().seats.find((entry) => entry.seatId === seatId);
+          return seat?.knownCards.map((card) => card.cardId).filter((cardId) => cardId > 0) ?? [];
+        }
       }
     );
-    const normalizedEvent: MoveCardEvent = {
+    if (corrected.ignore) return;
+    const event: MoveCardEvent = {
       ...rawEvent,
-      cardIds: sanitizedIds,
-      fromPosition,
-      toPosition: remapDrawPileToPosition({ ...rawEvent, cardIds: sanitizedIds })
+      cardIds: corrected.cardIds,
+      fromPosition: corrected.fromPosition,
+      toPosition: corrected.toPosition
     };
-    const specialCardIds = specialRecovery.recover(normalizedEvent);
-    const event: MoveCardEvent = specialCardIds ? { ...normalizedEvent, cardIds: specialCardIds } : normalizedEvent;
-    if (isSameZoneShow(event) && applySameZoneShow(event)) {
-      specialRecovery.record(event, event.cardIds);
+    if (isObfuscatedSameZoneShow({ ...event, srcSeatId: event.srcSeatId ?? null }) && applySameZoneShow(event)) {
       return;
     }
 
     movementSequence += 1;
-    discardExpiredSpellCardClues();
-    consumeSpellCluesFor(event.cardIds);
     if (pendingQiTransfer && movementSequence > pendingQiTransfer.expiresAfterMovement) {
       pendingQiTransfer = null;
     }
-    const temporaryZoneCardIds = recoverCardsFromTemporaryZone(
-      takesFromTemporaryZoneBottom(event) ? { ...event, fromPosition: DRAW_PILE_BOTTOM_POSITION } : event,
-      temporaryCardZones
-    );
-    const movementWithTemporaryCards = { ...event, cardIds: temporaryZoneCardIds };
     const preferredQiOwner = resolvePreferredQiOwner(event);
-    const clueCardIds = recoverCardsFromSpellClue(movementWithTemporaryCards);
-    // 手牌区的已知牌不是整手，暗牌部分移走时不能按「候选数 = 张数」认定。
-    const partialHandDeparture = event.fromZone === HAND_ZONE
-      && !isWholeHandDeparture(movementWithTemporaryCards, seatStateStore);
-    const resolvedCardIds = clueCardIds.some((cardId) => cardId > 0)
-      ? clueCardIds
-      : partialHandDeparture
-        ? [...movementWithTemporaryCards.cardIds]
-        : engine.resolveHiddenMovement(movementWithTemporaryCards, preferredQiOwner);
-    // 协议没带卡号时，用来源区已经明着的牌补上，才能记进对方手牌。
-    const controlledSeatCardIds = resolvedCardIds.some((cardId) => cardId > 0)
-      ? resolvedCardIds
-      : recoverKnownCardsAtSource(movementWithTemporaryCards, seatStateStore, engine);
-    const wholeHandDeparture = isWholeHandDeparture(movementWithTemporaryCards, seatStateStore)
-      || isAllianceWholeHandMove(event);
+    // 暗牌只在牌堆顶/底按已记录的顺序补号。不用同技能线索或来源区里的其它明牌去猜。
+    const pileCardIds = engine.resolveHiddenMovement(event, preferredQiOwner);
+    const qiCardIds = takeQiDiscardCards(
+      event,
+      engine.getZoneCardIds(formatZoneId(DRAW_PILE_OWNER, DISCARD_ZONE)),
+      (cardId) => engine.getOriginalOwnerSeatId(cardId),
+      preferredQiOwner
+    );
+    const resolvedCardIds = qiCardIds
+      ?? (pileCardIds.some((cardId) => cardId > 0) ? pileCardIds : [...event.cardIds]);
+    const seat = seatStateStore.getSnapshot().seats.find((entry) => entry.seatId === event.fromId);
+    const zoneKnown = event.fromZone === HAND_ZONE
+      ? (seat?.knownCards.map((card) => card.cardId) ?? [])
+      : [...engine.getZoneCardIds(formatZoneId(event.fromId, event.fromZone))];
+    const zoneLength = event.fromZone === HAND_ZONE
+      ? zoneKnown.filter((cardId) => cardId > 0).length + (seat?.unknownCardCount ?? 0)
+      : zoneKnown.filter((cardId) => cardId > 0).length;
+    const recoveredCardIds = takeHiddenZoneCards(
+      { ...event, cardIds: resolvedCardIds },
+      zoneKnown,
+      zoneLength
+    );
+    const wholeHandDeparture = event.fromZone === HAND_ZONE
+      && (event.cardCount === zoneLength || isAllianceWholeHandMove(event));
     const hiddenHandDeparture = event.fromZone === HAND_ZONE
-      && !controlledSeatCardIds.some((cardId) => cardId > 0);
-    const wholeHand = wholeHandDeparture && hiddenHandDeparture;
-    // 整手移动时，场景里的已知牌全部随手牌离开；即使协议只给了部分牌号，
-    // 也要把余下的已知牌补进目标座位，避免它们留在来源座位的明牌条。
-    const recoveredCardIds = wholeHandDeparture
-      // 保留上一步从引擎/来源座位恢复出的卡号。原始事件可能省略 CardIDs，
-      // 且场景快照可能已先清空来源手牌，不能在这里重新从它们推导。
-      ? recoverWholeHandMovement({ ...movementWithTemporaryCards, cardIds: controlledSeatCardIds }, seatStateStore)
-      : controlledSeatCardIds;
-    if (isXinyouCardGain({
-      spellMatched: isXinyouSpell(event.spellId),
-      toZone: event.toZone,
-      toId: event.toId,
-      srcSeatId: event.srcSeatId ?? null,
-      casterSeatId: xinyouCaster && movementSequence <= xinyouCaster.expiresAfterMovement
-        ? xinyouCaster.seatId
-        : null
-    })) {
-      recoveredCardIds.filter((cardId) => cardId > 0).forEach((cardId) => {
-        engine.rememberPersistentCardTag(cardId, XINYOU_TAG);
-      });
-    }
-    if (preferredQiOwner !== null && recoveredCardIds.some((cardId) => cardId > 0)) {
-      recoveredCardIds.filter((cardId) => cardId > 0).forEach((cardId) => {
-        engine.rememberPersistentCardTag(cardId, '炁', preferredQiOwner);
-      });
-      pendingQiTransfer = null;
-      pendingQiDeath = null;
-    }
+      && !recoveredCardIds.some((cardId) => cardId > 0);
     traceMingpai('move', {
       spellId: event.spellId,
       moveType: event.moveType,
@@ -407,12 +437,40 @@ export function installMingpaiController(
       resolvedIds: [...recoveredCardIds],
       remappedFromPosition: event.fromPosition !== rawEvent.fromPosition ? event.fromPosition : undefined
     });
-    trackTemporaryZoneMovement(event, recoveredCardIds, temporaryCardZones, () => ++temporaryZoneSequence);
-    engine.applyMovement(event, recoveredCardIds);
-    specialRecovery.record(event, recoveredCardIds);
+    // 引擎落位。牌离开手牌时协议没公开身份就不能泄露，展示与标签仍按控制器解析结果；
+    // 从技能临时区、处理区出来时这些牌本来就在明面上，直接用引擎的落位结果。
+    const engineMovedCardIds = engine.applyMovement(
+      event.spellId === SPELL_3483
+        ? { ...event, pilePackCount: getObfuscated3483PileCount() }
+        : event,
+      recoveredCardIds
+    );
+    const appliedCardIds = event.fromZone !== HAND_ZONE && engineMovedCardIds.some((cardId) => cardId > 0)
+      ? [...engineMovedCardIds]
+      : recoveredCardIds;
+    if (isXinyouCardGain({
+      spellMatched: isXinyouSpell(event.spellId),
+      toZone: event.toZone,
+      toId: event.toId,
+      srcSeatId: event.srcSeatId ?? null,
+      casterSeatId: xinyouCaster && movementSequence <= xinyouCaster.expiresAfterMovement
+        ? xinyouCaster.seatId
+        : null
+    })) {
+      appliedCardIds.filter((cardId) => cardId > 0).forEach((cardId) => {
+        engine.rememberPersistentCardTag(cardId, XINYOU_TAG);
+      });
+    }
+    if (preferredQiOwner !== null && appliedCardIds.some((cardId) => cardId > 0)) {
+      appliedCardIds.filter((cardId) => cardId > 0).forEach((cardId) => {
+        engine.rememberPersistentCardTag(cardId, '炁', preferredQiOwner);
+      });
+      pendingQiTransfer = null;
+      pendingQiDeath = null;
+    }
 
     // 临时区进出时刷新 unknown 投影
-    const known = recoveredCardIds.filter((id) => id > 0);
+    const known = appliedCardIds.filter((id) => id > 0);
     if (TEMPORARY_CARD_ZONES.has(event.toZone) && known.length) {
       engine.addZoneCardIds(MINGPAI_ZONE.UNKNOWN, known);
     }
@@ -425,21 +483,23 @@ export function installMingpaiController(
       moveType: event.moveType,
       fromZone: event.fromZone,
       toZone: event.toZone,
+      fromId: event.fromId,
       toId: event.toId,
-      selfSeatId: seatStateStore.getSnapshot().selfSeatId
+      selfSeatId: seatStateStore.getSnapshot().selfSeatId,
+      seatLabel: readSeatLabel
     });
     if (sourceLabel) {
-      recoveredCardIds.filter((cardId) => cardId > 0).forEach((cardId) => {
+      appliedCardIds.filter((cardId) => cardId > 0).forEach((cardId) => {
         engine.rememberPersistentCardTag(cardId, sourceLabel);
       });
     }
-    recoveredCardIds.forEach((cardId) => {
+    appliedCardIds.forEach((cardId) => {
       const persistentTags = engine.getPersistentTags(cardId);
       if (persistentTags.length) seatStateStore.setPersistentKnownCardTags(cardId, persistentTags);
     });
     seatStateStore.applyKnownHandMovement({
       cardCount: event.cardCount,
-      cardIds: recoveredCardIds,
+      cardIds: appliedCardIds,
       fromSeatId: event.fromId,
       fromZone: event.fromZone,
       toSeatId: event.toId,
@@ -456,7 +516,6 @@ export function installMingpaiController(
 
   function resetQiTransferState(): void {
     activeQiSeats.clear();
-    pendingSpellCardClues.length = 0;
     eligibleQiKillersByVictim.clear();
     pendingQiDeath = null;
     pendingQiTransfer = null;
@@ -519,98 +578,46 @@ export function installMingpaiController(
     return null;
   }
 
-  function rememberSpellCardClue(event: {
-    seatId: number;
-    spellId: number;
-    targetSeatIds: readonly number[];
-    cardIds: readonly number[];
-  }): void {
-    const cardIds = [...new Set(event.cardIds.filter((cardId) => cardId > 0))];
-    if (!cardIds.length) return;
-    pendingSpellCardClues.push({
-      spellId: event.spellId,
-      casterSeatId: event.seatId,
-      targetSeatIds: [...event.targetSeatIds],
-      cardIds,
-      expiresAfterMovement: movementSequence + 6
-    });
-    if (pendingSpellCardClues.length > 12) {
-      pendingSpellCardClues.splice(0, pendingSpellCardClues.length - 12);
-    }
-  }
-
-  function discardExpiredSpellCardClues(): void {
-    for (let index = pendingSpellCardClues.length - 1; index >= 0; index -= 1) {
-      if (movementSequence > pendingSpellCardClues[index].expiresAfterMovement) {
-        pendingSpellCardClues.splice(index, 1);
-      }
-    }
-  }
-
-  /** 线索里的牌已经以明确卡号移动过，就不能再用来补后续的暗牌移动。 */
-  function consumeSpellCluesFor(cardIds: readonly number[]): void {
-    const moved = new Set(cardIds.filter((cardId) => cardId > 0));
-    if (!moved.size) return;
-    for (let index = pendingSpellCardClues.length - 1; index >= 0; index -= 1) {
-      if (pendingSpellCardClues[index].cardIds.some((cardId) => moved.has(cardId))) {
-        pendingSpellCardClues.splice(index, 1);
-      }
-    }
-  }
-
-  function recoverCardsFromSpellClue(movement: TemporaryZoneMovement): number[] {
-    if (movement.cardIds.some((cardId) => cardId > 0)) return [...movement.cardIds];
-    // 摸牌来自牌堆，不可能是技能已经打出 / 交出的那几张。
-    if (movement.fromZone === DRAW_PILE_ZONE) return [...movement.cardIds];
-    const candidates = pendingSpellCardClues.filter((clue) => (
-      clue.cardIds.length === movement.cardCount
-      && (!movement.spellId || !clue.spellId || movement.spellId === clue.spellId)
-      && (clue.casterSeatId === movement.fromId
-        || clue.casterSeatId === movement.toId
-        || clue.targetSeatIds.includes(movement.fromId)
-        || clue.targetSeatIds.includes(movement.toId))
-    ));
-    if (candidates.length !== 1) return [...movement.cardIds];
-    const [match] = candidates;
-    pendingSpellCardClues.splice(pendingSpellCardClues.indexOf(match), 1);
-    return [...match.cardIds];
-  }
-
   return {
     engine,
     dispose() {
       unsubscribe();
       unsubscribeSeatState();
-      temporaryCardZones.clear();
-      temporaryZoneSequence = 0;
+      clearTempZoneGrids();
       resetQiTransferState();
-      specialRecovery.clear();
     }
   };
 }
 
-/** 3208：暗牌从技能区（10）进手牌时拿的是最底下一张。 */
-function takesFromTemporaryZoneBottom(movement: TemporaryZoneMovement): boolean {
-  return movement.spellId === 3208 && movement.fromZone === 10 && movement.toZone === HAND_ZONE
-    && !movement.cardIds.some((cardId) => cardId > 0);
-}
-
 const XINYOU_SKILL = { id: 'xinyou', title: '心幽', skillIds: [] as number[], spellNames: ['心幽'] };
-const JIAOYU_SKILL = { id: 'jiaoyu', title: '椒遇', skillIds: [] as number[], spellNames: ['椒遇'] };
 
-function isXinyouSpell(spellId: number): boolean {
-  if (!Number.isInteger(spellId) || spellId <= 0) return false;
-  return resolveSkillIds(XINYOU_SKILL, locateGameScene(window)).includes(spellId);
-}
+/** 3571：判定牌按座位颜色回手。 */
+const JUDGE_RECOVERY_SPELL_ID = 0xdf3;
+/** 椒遇：同样按座位颜色把判定牌回手，颜色来自技能私有数据。 */
+const JIAOYU_SKILL = { id: 'jiaoyu', title: '椒遇', skillIds: [] as number[], spellNames: ['椒遇'] };
 
 function isJiaoyuSpell(spellId: number): boolean {
   if (!Number.isInteger(spellId) || spellId <= 0) return false;
   return resolveSkillIds(JIAOYU_SKILL, locateGameScene(window)).includes(spellId);
 }
 
+/** 谋周瑜醉锋：看别人的手牌，参数与固定名单里的看手牌技能同形。 */
+const ZUIFENG_SKILL = { id: 'zuifeng', title: '醉锋', skillIds: [] as number[], spellNames: ['醉锋'] };
+
+function isHandLookSpell(spellId: number): boolean {
+  if (!Number.isInteger(spellId) || spellId <= 0) return false;
+  return resolveSkillIds(ZUIFENG_SKILL, locateGameScene(window)).includes(spellId);
+}
+
+function isXinyouSpell(spellId: number): boolean {
+  if (!Number.isInteger(spellId) || spellId <= 0) return false;
+  return resolveSkillIds(XINYOU_SKILL, locateGameScene(window)).includes(spellId);
+}
+
 const QI_STATE_ID = 0xe92;
 const QI_TRANSFER_SPELL_IDS = new Set([0xe92, 0xe93]);
-const DRAW_PILE_BOTTOM_POSITION = 0;
+/** 3483：手牌暂存到技能区后按 key 换回。 */
+const SPELL_3483 = 0xd9b;
 const WHOLE_HAND_SHOW_MOVE_TYPE = 24;
 
 interface TemporaryZoneMovement {
@@ -628,75 +635,6 @@ interface TemporaryZoneMovement {
   spellId: number;
 }
 
-interface TemporaryCardZone {
-  cardIds: number[];
-  logicalCardIds: number[];
-  gridByCardId: Map<number, number>;
-  topGridCount: number;
-  traceClosed: boolean;
-  sequence: number;
-}
-
-interface SpellCardClue {
-  spellId: number;
-  casterSeatId: number;
-  targetSeatIds: number[];
-  cardIds: number[];
-  expiresAfterMovement: number;
-}
-
-const EQUIP_ZONE = 4;
-
-/**
- * 协议没带卡号时，用来源区里已经确定的牌补上。
- * 本家手牌仍按张数或位置切片。装备区和场上明牌只在能唯一对上时补，避免把别的牌记到对方手上。
- */
-function recoverKnownCardsAtSource(
-  movement: TemporaryZoneMovement,
-  seatStateStore: SeatStateStore,
-  engine: MingpaiEngine
-): number[] {
-  if (movement.cardIds.some((cardId) => cardId > 0)) return [...movement.cardIds];
-  if (movement.cardCount <= 0) return [...movement.cardIds];
-  const snapshot = seatStateStore.getSnapshot();
-  const seat = snapshot.seats.find((entry) => entry.seatId === movement.fromId);
-  // 鲁肃缔盟会把整手牌交给另一方；引擎按 toId 更新归属，
-  // 这里要从交换前的来源快照恢复明牌卡号。
-  if (isAllianceWholeHandMove(movement)) {
-    // 协议省略卡号时，来源的已知牌与未知占位一起进入临时区。
-    const knownAtSource = [...new Set([
-      ...(seat?.knownCards.map((card) => card.cardId) ?? []),
-      ...engine.getHandCardIds(movement.fromId)
-    ].filter((cardId) => cardId > 0))];
-    if (knownAtSource.length > 0 && knownAtSource.length <= movement.cardCount) {
-      return [...knownAtSource, ...Array.from({ length: movement.cardCount - knownAtSource.length }, () => 0)];
-    }
-  }
-  const knownIds = knownIdsInSourceZone(movement, seat, snapshot.controlledSeatIds.includes(movement.fromId), engine);
-  if (movement.fromZone === HAND_ZONE && movement.toZone === HAND_ZONE && seat) {
-    // 部分客户端先更新公开手牌列表、再发隐藏牌号的换牌消息（如缔盟）。
-    // 用事件前引擎记录与当前公开列表做差；只有差集数量精确吻合才认定转出的牌。
-    const visibleNow = new Set(seat.knownCards.map((card) => card.cardId).filter((cardId) => cardId > 0));
-    const departedKnown = engine.getHandCardIds(movement.fromId)
-      .filter((cardId) => cardId > 0 && !visibleNow.has(cardId));
-    if (departedKnown.length === movement.cardCount) return departedKnown;
-  }
-  if (!knownIds.length) return [...movement.cardIds];
-  // 手里还有暗牌时，协议没给卡号就不能认定移走的是那张明牌。
-  if (movement.fromZone === HAND_ZONE && (seat?.unknownCardCount ?? 0) > 0) {
-    return [...movement.cardIds];
-  }
-  if (knownIds.length === movement.cardCount) return knownIds;
-  if (movement.fromZone !== HAND_ZONE || !snapshot.controlledSeatIds.includes(movement.fromId)) {
-    return [...movement.cardIds];
-  }
-  const start = movement.fromPosition;
-  if (!Number.isInteger(start) || start < 0 || start + movement.cardCount > knownIds.length) {
-    return [...movement.cardIds];
-  }
-  return knownIds.slice(start, start + movement.cardCount);
-}
-
 /** 缔盟先把双方整手牌分别放入各自的技能临时区，再从临时区交给对方。 */
 function isAllianceWholeHandMove(
   movement: Pick<TemporaryZoneMovement, 'spellId' | 'moveType' | 'fromZone' | 'toZone'>
@@ -704,197 +642,4 @@ function isAllianceWholeHandMove(
   return movement.spellId === 121 && movement.moveType === 11
     && movement.fromZone === HAND_ZONE
     && movement.toZone === 10;
-}
-
-function knownIdsInSourceZone(
-  movement: TemporaryZoneMovement,
-  seat: { knownCards: { cardId: number }[]; equipmentCards?: { cardId: number }[]; unknownCardCount: number } | undefined,
-  controlled: boolean,
-  engine: MingpaiEngine
-): number[] {
-  const positive = (ids: number[]) => [...new Set(ids.filter((cardId) => cardId > 0))];
-  if (movement.fromZone === HAND_ZONE && seat) {
-    const handIds = positive(seat.knownCards.map((card) => card.cardId));
-    if (controlled || seat.unknownCardCount === 0) return handIds;
-  }
-  if (movement.fromZone === EQUIP_ZONE && seat) {
-    return positive((seat.equipmentCards ?? []).map((card) => card.cardId));
-  }
-  return positive([...engine.getZoneCardIds(formatZoneId(movement.fromId, movement.fromZone))]);
-}
-
-/** 暗牌整手移走：密诏类技能，或张数 ≥ 当前手牌数。 */
-function isWholeHandDeparture(movement: TemporaryZoneMovement, seatStateStore: SeatStateStore): boolean {
-  if (movement.fromZone !== HAND_ZONE) return false;
-  if (isWholeHandMove(movement) || isAllianceWholeHandMove(movement)) return true;
-  const seat = seatStateStore.getSnapshot().seats.find((entry) => entry.seatId === movement.fromId);
-  if (!seat) return false;
-  const handCount = seat.knownCards.length + seat.unknownCardCount;
-  return handCount > 0 && movement.cardCount >= handCount;
-}
-
-/** 整手移走时该座位已知牌必然全部随之离开。 */
-function recoverWholeHandMovement(
-  movement: TemporaryZoneMovement,
-  seatStateStore: SeatStateStore
-): number[] {
-  const suppliedIds = movement.cardIds.filter((cardId) => cardId > 0);
-  const seat = seatStateStore.getSnapshot().seats.find((entry) => entry.seatId === movement.fromId);
-  const knownIds = [...new Set([
-    ...suppliedIds,
-    ...(seat?.knownCards.map((card) => card.cardId).filter((cardId) => cardId > 0) ?? [])
-  ])];
-  if (!knownIds.length || knownIds.length > movement.cardCount) return [...movement.cardIds];
-  return [...knownIds, ...Array.from({ length: movement.cardCount - knownIds.length }, () => 0)];
-}
-
-/**
- * 暗牌离开临时区时，用之前记在该区的牌号补上。
- * 协议里没有牌号，只能按进入顺序从顶或从底取。
- */
-function recoverCardsFromTemporaryZone(
-  movement: TemporaryZoneMovement,
-  temporaryCardZones: Map<string, TemporaryCardZone>
-): number[] {
-  const suppliedCardIds = movement.cardIds.filter((cardId) => cardId > 0);
-  if (suppliedCardIds.length || !TEMPORARY_CARD_ZONES.has(movement.fromZone)) {
-    return [...movement.cardIds];
-  }
-  const exactKey = temporaryZoneKey(
-    movement.fromId,
-    movement.fromZone,
-    movement.fromPosition,
-    movement.fromZoneParam,
-    movement.spellId
-  );
-  const exactZone = temporaryCardZones.get(exactKey);
-  if (exactZone && exactZone.logicalCardIds.length >= movement.cardCount) {
-    return selectDepartingTemporaryCards(exactZone, movement);
-  }
-  const keyPrefix = `${movement.fromId}:${movement.fromZone}:`;
-  const candidates = [...temporaryCardZones.entries()]
-    .filter(([key, zone]) => {
-      if (!key.startsWith(keyPrefix) || !key.endsWith(`:${movement.spellId}`)
-        || zone.logicalCardIds.length < movement.cardCount) return false;
-      const [, , , zoneParam] = key.split(':').map(Number);
-      return !movement.fromZoneParam || zoneParam === movement.fromZoneParam;
-    });
-  if (candidates.length === 1) return selectDepartingTemporaryCards(candidates[0][1], movement);
-  return [...movement.cardIds];
-}
-
-/** 技能 3208 从底部取，其余从顶部取，取出后临时区里的顺序跟着缩短。 */
-function selectDepartingTemporaryCards(
-  zone: TemporaryCardZone,
-  movement: TemporaryZoneMovement
-): number[] {
-  const count = movement.cardCount;
-  if (count <= 0 || count > zone.logicalCardIds.length) return [...movement.cardIds];
-  if (count === zone.logicalCardIds.length) return [...zone.logicalCardIds];
-  return movement.fromPosition === DRAW_PILE_BOTTOM_POSITION
-    ? zone.logicalCardIds.slice(-count)
-    : zone.logicalCardIds.slice(0, count);
-}
-
-/** 牌进入临时区时按位置记下顺序，离开时从对应区删掉，供下一次暗牌移动对上牌号。 */
-function trackTemporaryZoneMovement(
-  movement: TemporaryZoneMovement,
-  effectiveCardIds: readonly number[],
-  temporaryCardZones: Map<string, TemporaryCardZone>,
-  nextSequence: () => number
-): void {
-  const knownCardIds = effectiveCardIds.filter((cardId) => cardId > 0);
-  if (TEMPORARY_CARD_ZONES.has(movement.fromZone)) {
-    removeTemporaryCards(temporaryCardZones, movement, knownCardIds, nextSequence);
-  }
-  if (!TEMPORARY_CARD_ZONES.has(movement.toZone) || !knownCardIds.length) return;
-  const key = temporaryZoneKey(
-    movement.toId,
-    movement.toZone,
-    movement.toPosition,
-    movement.toZoneParam,
-    movement.spellId
-  );
-  const existing = temporaryCardZones.get(key);
-  const cardIds = [...new Set([...(existing?.cardIds ?? []), ...knownCardIds])];
-  temporaryCardZones.delete(key);
-  const zone = createTemporaryCardZone(cardIds, nextSequence());
-  if (isAllianceWholeHandMove(movement)) {
-    // 缔盟整手暂存必须保留暗牌占位，出区张数包含这些暗牌。
-    zone.logicalCardIds = [...effectiveCardIds];
-  }
-  temporaryCardZones.set(key, zone);
-}
-
-function removeTemporaryCards(
-  temporaryCardZones: Map<string, TemporaryCardZone>,
-  movement: TemporaryZoneMovement,
-  departingCardIds: readonly number[],
-  nextSequence: () => number
-): void {
-  const prefix = `${movement.fromId}:${movement.fromZone}:`;
-  // 先快照再遍历：循环内 delete+set 会把键移到 Map 末尾被迭代器再次访问，
-  // 部分离场（remaining 非空）时同一键会被无限重写，主线程直接卡死。
-  for (const [key, zone] of [...temporaryCardZones]) {
-    if (!key.startsWith(prefix)) continue;
-    const remaining = zone.cardIds.filter((cardId) => !departingCardIds.includes(cardId));
-    if (remaining.length) {
-      temporaryCardZones.delete(key);
-      temporaryCardZones.set(key, createTemporaryCardZone(remaining, nextSequence()));
-    }
-    else temporaryCardZones.delete(key);
-  }
-}
-
-function createTemporaryCardZone(cardIds: number[], sequence = 0): TemporaryCardZone {
-  return {
-    cardIds: [...cardIds],
-    logicalCardIds: [...cardIds],
-    gridByCardId: new Map(cardIds.map((cardId, index) => [cardId, index])),
-    topGridCount: cardIds.length,
-    traceClosed: false,
-    sequence
-  };
-}
-
-function applyTemporaryCardReorder(
-  event: { seatId: number; spellId: number; zoneParam?: number | null; trace: readonly number[] },
-  temporaryCardZones: Map<string, TemporaryCardZone>
-): void {
-  const candidates = [...temporaryCardZones.entries()]
-    .filter(([key]) => key.startsWith(`${event.seatId}:`) && key.endsWith(`:${event.spellId}`))
-    .filter(([key]) => event.zoneParam === null || event.zoneParam === undefined
-      || Number(key.split(':')[3]) === event.zoneParam)
-    .sort((left, right) => right[1].sequence - left[1].sequence);
-  if (!candidates.length) return;
-  const [key, zone] = candidates[0];
-  if (event.trace.length === 1) {
-    zone.traceClosed = true;
-    return;
-  }
-  const [sourceIndex, targetGrid, finalIndex] = event.trace;
-  if (sourceIndex >= zone.logicalCardIds.length || targetGrid >= zone.topGridCount * 2) return;
-  const movedCardId = zone.logicalCardIds[sourceIndex];
-  const oldGrid = zone.gridByCardId.get(movedCardId);
-  if (oldGrid === undefined) return;
-  const displacedCardId = [...zone.gridByCardId]
-    .find(([cardId, grid]) => cardId !== movedCardId && grid === targetGrid)?.[0];
-  if (displacedCardId !== undefined) zone.gridByCardId.set(displacedCardId, oldGrid);
-  zone.gridByCardId.set(movedCardId, targetGrid);
-  zone.logicalCardIds.splice(sourceIndex, 1);
-  const insertionIndex = (finalIndex % zone.topGridCount + zone.topGridCount) % zone.topGridCount;
-  zone.logicalCardIds.splice(Math.min(insertionIndex, zone.logicalCardIds.length), 0, movedCardId);
-  zone.sequence = Math.max(zone.sequence, ...candidates.map(([, candidate]) => candidate.sequence)) + 1;
-  temporaryCardZones.delete(key);
-  temporaryCardZones.set(key, zone);
-}
-
-function temporaryZoneKey(
-  seatId: number,
-  zone: number,
-  position: number,
-  zoneParam: number,
-  spellId: number
-): string {
-  return `${seatId}:${zone}:${position}:${zoneParam}:${spellId}`;
 }

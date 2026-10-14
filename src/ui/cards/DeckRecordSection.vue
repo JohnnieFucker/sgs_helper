@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/** 常规页牌局记录区块：弃牌/牌堆顶底等列表与排序。 */
+/** 常规页牌局记录区块：本回合弃牌列表与排序。 */
 import { computed, onBeforeUnmount, ref } from 'vue';
 import type { XiaochaoConfigStore } from '../../config/config-store.ts';
 import type { DeckRecordStore } from '../../features/deck-record/deck-record-store.ts';
@@ -106,40 +106,6 @@ function rankOrder(rank: string): number {
 
 <template>
   <section v-if="enabled" class="xc-deck-record" aria-label="牌堆记录">
-    <div class="xc-deck-record__group">
-      <div class="xc-deck-record__group-title">
-        <strong>牌堆顶</strong>
-        <span v-if="snapshot.deckTopCardIds.length">左侧最先摸到</span>
-      </div>
-      <div
-        class="xc-deck-record__cards"
-        :data-empty="snapshot.deckTopCardIds.length ? undefined : '暂无已知牌'"
-      >
-        <ShoupaiCardFace
-          v-for="(cardId, index) in snapshot.deckTopCardIds"
-          :key="`top-${cardId}-${index}`"
-          :card-id="cardId"
-          :game-card-catalog="gameCardCatalog"
-        />
-      </div>
-    </div>
-    <div class="xc-deck-record__group">
-      <div class="xc-deck-record__group-title">
-        <strong>牌堆底</strong>
-        <span v-if="snapshot.deckBottomCardIds.length">右侧为最底部</span>
-      </div>
-      <div
-        class="xc-deck-record__cards"
-        :data-empty="snapshot.deckBottomCardIds.length ? undefined : '暂无已知牌'"
-      >
-        <ShoupaiCardFace
-          v-for="(cardId, index) in snapshot.deckBottomCardIds"
-          :key="`bottom-${cardId}-${index}`"
-          :card-id="cardId"
-          :game-card-catalog="gameCardCatalog"
-        />
-      </div>
-    </div>
     <div class="xc-deck-record__group xc-deck-record__group--discard">
       <button
         type="button"

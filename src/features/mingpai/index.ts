@@ -15,8 +15,6 @@ export {
 export { MINGPAI_ZONE, type MingpaiZoneId } from './mingpai-zones.ts';
 export { installMingpaiController } from './mingpai-controller.ts';
 export { applyCardReveals } from './reveal-sink.ts';
-export { resolveOptTargetReveals, hasOptTargetRule } from './rules/opt-target-rules.ts';
-export { resolveSpellOptRepReveals } from './rules/spell-opt-rep-rules.ts';
 export {
   isIgnoredMove,
   isSameZoneShow,

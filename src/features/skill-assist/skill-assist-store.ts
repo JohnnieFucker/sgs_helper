@@ -77,6 +77,8 @@ export interface SkillAssistCardKnowledge {
   /** 本家与全部受控座位；资援按这些座位的手牌计算。 */
   getControlledSeatIds?(): readonly number[];
   getSeatLabel?(seatId: number): string;
+  /** 国战：宴戏看整副牌堆，其它模式只看牌堆顶前两张。 */
+  isNationWar?(): boolean;
 }
 
 export interface SkillAssistStore {
@@ -108,6 +110,8 @@ type SpellOptRepEvent = Extract<GameEvent, { type: 'spell-opt-rep' }>;
 
 const DRAW_PILE_ZONE = 1;
 const HAND_ZONE = 5;
+/** 宴戏只看牌堆顶前两张；国战看整副牌堆。 */
+const YANXI_DECK_WINDOW = 2;
 const JUDGE_SHOW_ZONE = 8;
 const EQUIP_ZONES = [4, 6];
 const CHENGXIANG_MOVE_TYPE = 6;
@@ -613,7 +617,9 @@ export function createSkillAssistStore(
     const runtime = panels.get('yanxi');
     if (!runtime) return;
     pin(runtime);
-    const inferenceFaces = partitionCandidatesByMingpai(mingpaiEngine, candidateIds);
+    const inferenceFaces = partitionCandidatesByMingpai(mingpaiEngine, candidateIds, {
+      deckTopCount: cardKnowledge.isNationWar?.() ? null : YANXI_DECK_WINDOW
+    });
     // 本家手牌面优先：若 findKZ 尚无手牌命中，再并入引擎已登记手牌区
     const faces = collectHandAndDeckFaces(mingpaiEngine);
     const inference = formatYanxiResult({
