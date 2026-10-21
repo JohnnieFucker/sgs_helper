@@ -213,16 +213,25 @@ function mergeVisualArea(
   };
 }
 
+/** 旧版通过方法取城池，新版 CityRoot 直接持有带 CityId 的城市节点。 */
+function readCityItem(cityView: UnknownRecord | null, cityId: string | number): UnknownRecord | null {
+  const getter = cityView?.GetCityItemById;
+  if (typeof getter === 'function') return asRecord(getter.call(cityView, cityId));
+  if (typeof cityView?.getChildAt !== 'function') return null;
+  for (let index = 0; index < Number(cityView.numChildren); index += 1) {
+    const item = asRecord(cityView.getChildAt(index));
+    if (item && String(item.CityId ?? asRecord(item.cityVo)?.CityID) === String(cityId)) return item;
+  }
+  return null;
+}
+
 /** 优先 GetCityItemById，否则用 Rcity 表坐标。 */
 export function resolveCityGeometry(
   cityView: UnknownRecord | null,
   cityId: string | number,
   meta: RogueCityMeta
 ): RogueCityGeometry {
-  const getter = cityView?.GetCityItemById;
-  const item = typeof getter === 'function'
-    ? asRecord((getter as Function).call(cityView, cityId))
-    : null;
+  const item = readCityItem(cityView, cityId);
   if (item) {
     const scaleX = Number(item.scaleX) || Number(cityView?.directionX) || 1;
     const scaleY = Number(item.scaleY) || Number(cityView?.directionY) || scaleX;
@@ -252,9 +261,7 @@ export function resolveCityGeometry(
 
 /** 城池图是否已经能显示。 */
 export function cityImageReady(cityView: UnknownRecord | null, cityId: string | number): boolean {
-  const getter = cityView?.GetCityItemById;
-  if (typeof getter !== 'function') return true;
-  const item = asRecord((getter as Function).call(cityView, cityId));
+  const item = readCityItem(cityView, cityId);
   const cityImg = asRecord(item?.cityImg);
   if (!cityImg) return true;
   const tw = Number(cityImg.textureWidth) || 0;
@@ -285,9 +292,7 @@ export function readCityHasEvent(
   cityView: UnknownRecord | null,
   cityId: string | number
 ): 'true' | 'false' | 'unknown' {
-  const getter = cityView?.GetCityItemById;
-  if (typeof getter !== 'function') return 'unknown';
-  const item = asRecord((getter as Function).call(cityView, cityId));
+  const item = readCityItem(cityView, cityId);
   if (!item) return 'unknown';
   // 游戏侧偶发用 0/1，不能只认严格布尔。
   if (item.HasEvent === true || item.HasEvent === 1) return 'true';

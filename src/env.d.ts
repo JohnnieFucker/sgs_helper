@@ -13,9 +13,6 @@ interface Window {
     openExternal?: (url: string) => Promise<unknown>;
     invoke?: (channel: string, data?: unknown) => Promise<unknown>;
   };
-  xiaochaoStorage?: {
-    saveCredentials?: (scope: 'official' | '4399', credentials: unknown[]) => unknown;
-  };
   __XIAOCHAO_ENGINEERING__?: Record<string, unknown>;
   __XIAOCHAO_GAME_SCENE__?: unknown;
   Laya?: {

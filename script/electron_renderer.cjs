@@ -1,4 +1,13 @@
 const { ipcRenderer, contextBridge } = require('electron');
+// 清理旧助手保存的密码，不接触游戏平台的登录状态。
+try {
+    for (const key of ['sgsol.rememberedCredentials.v2', 'sgsol.rememberedCredentials.v2.4399']) {
+        window.localStorage.removeItem(key);
+    }
+} catch (error) {
+    console.warn('旧助手密码清理失败:', error);
+}
+
 async function GetSteamId(){
     const steamId =  await ipcRenderer.invoke('get-steam-id');
     console.log('你的 Steam ID 是:', steamId);
@@ -61,12 +70,6 @@ const xiaochaoStorage = {
         key = String(key);
         nativeLocalStorage.removeItem(key);
         if (sharedSettingKeys.has(key)) sendSharedSync('xiaochao-setting-delete-sync', key);
-    },
-    getCredentials: (scope, localCredentials) => {
-        return sendSharedSync('xiaochao-credentials-get-sync', { scope, localCredentials }) || localCredentials || [];
-    },
-    saveCredentials: (scope, credentials) => {
-        return sendSharedSync('xiaochao-credentials-set-sync', { scope, credentials });
     }
 };
 

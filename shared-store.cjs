@@ -2,7 +2,7 @@
  * 跨微端实例共享的本地持久化存储。
  *
  * 写入 userData/xiaochao/shared.json，用目录锁保证多进程互斥。
- * 负责两类数据：小抄设置项（xiaochaoSettings）与按大区隔离的账号密码。
+ * 仅保存小抄设置项（xiaochaoSettings）。
  */
 
 const fs = require('fs');
@@ -13,62 +13,6 @@ function sleepSync(milliseconds) {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
 }
 
-/** 清洗账号列表：去空、按账号去重、按更新时间倒序，最多保留 30 条。 */
-function normalizeCredentials(list) {
-    if (!Array.isArray(list)) return [];
-    const result = [];
-    for (const item of list) {
-        const account = String(item && item.account || '').trim();
-        const password = String(item && item.password || '');
-        if (!account || !password) continue;
-        const normalized = {
-            account,
-            password,
-            updatedAt: Number(item && item.updatedAt) || Date.now(),
-            remark: String(item && item.remark || '').trim().slice(0, 24)
-        };
-        const index = result.findIndex((entry) => entry.account === account);
-        if (index >= 0) result[index] = normalized;
-        else result.push(normalized);
-    }
-    return result.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 30);
-}
-
-/** 规范化凭证作用域（大区）名称，非法值回退为 official。 */
-function normalizeCredentialScope(scope) {
-    const normalized = String(scope || 'official').trim();
-    return normalized && normalized.length <= 64 ? normalized : 'official';
-}
-
-/** 兼容旧调用：首参可为凭证数组，也可为 scope + credentials。 */
-function parseCredentialArguments(scopeOrCredentials, credentials) {
-    if (Array.isArray(scopeOrCredentials)) {
-        return { scope: 'official', credentials: scopeOrCredentials };
-    }
-    return {
-        scope: normalizeCredentialScope(scopeOrCredentials),
-        credentials: Array.isArray(credentials) ? credentials : []
-    };
-}
-
-/** 惰性初始化 credentialsByScope；把旧版扁平 credentials 迁入 official。 */
-function ensureCredentialScopes(store) {
-    if (!store.credentialsByScope || typeof store.credentialsByScope !== 'object') {
-        store.credentialsByScope = {};
-    }
-    if (!store.credentialScopesInitialized || typeof store.credentialScopesInitialized !== 'object') {
-        store.credentialScopesInitialized = {};
-    }
-    if (store.credentialsInitialized === true && store.credentialScopesInitialized.official !== true) {
-        store.credentialsByScope.official = normalizeCredentials(store.credentials);
-        store.credentialScopesInitialized.official = true;
-    }
-}
-
-/**
- * 创建带文件锁的共享配置读写器。
- * @param {string} filePath shared.json 绝对路径
- */
 function createSharedStore(filePath) {
     const lockPath = filePath + '.lock';
 
@@ -137,6 +81,12 @@ function createSharedStore(filePath) {
         }
     }
 
+    // 只清理旧助手密码字段，保留设置、战绩等其他数据。
+    const credentialKeys = ['credentials', 'credentialsByScope', 'credentialsInitialized', 'credentialScopesInitialized'];
+    const previous = read();
+    if (credentialKeys.some(key => Object.prototype.hasOwnProperty.call(previous, key))) {
+        update(store => { for (const key of credentialKeys) delete store[key]; });
+    }
     return {
         /** 首次注册设置键：共享端尚无值时用本地值填充，并返回已有共享值。 */
         registerSettings(keys, localValues) {
@@ -171,36 +121,8 @@ function createSharedStore(filePath) {
             update((store) => {
                 if (store.xiaochaoSettings && typeof store.xiaochaoSettings === 'object') delete store.xiaochaoSettings[key];
             });
-        },
-        /** 读取指定大区凭证；该大区首次访问时可用本地列表初始化。 */
-        getCredentials(scopeOrCredentials, localCredentials) {
-            const parsed = parseCredentialArguments(scopeOrCredentials, localCredentials);
-            return update((store) => {
-                ensureCredentialScopes(store);
-                if (store.credentialScopesInitialized[parsed.scope] !== true) {
-                    const stored = normalizeCredentials(store.credentialsByScope[parsed.scope]);
-                    store.credentialsByScope[parsed.scope] = stored.length
-                        ? stored
-                        : normalizeCredentials(parsed.credentials);
-                    store.credentialScopesInitialized[parsed.scope] = true;
-                }
-                return normalizeCredentials(store.credentialsByScope[parsed.scope]);
-            });
-        },
-        /** 覆盖写入指定大区凭证；official 同步回旧字段 credentials。 */
-        setCredentials(scopeOrCredentials, credentials) {
-            const parsed = parseCredentialArguments(scopeOrCredentials, credentials);
-            update((store) => {
-                ensureCredentialScopes(store);
-                store.credentialsByScope[parsed.scope] = normalizeCredentials(parsed.credentials);
-                store.credentialScopesInitialized[parsed.scope] = true;
-                if (parsed.scope === 'official') {
-                    store.credentials = store.credentialsByScope.official;
-                    store.credentialsInitialized = true;
-                }
-            });
         }
     };
 }
 
-module.exports = { createSharedStore, normalizeCredentials };
+module.exports = { createSharedStore };

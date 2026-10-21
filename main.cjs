@@ -4,9 +4,8 @@
  * 职责概览：
  * - 创建无边框主窗口并加载 index_wd.html；
  * - 初始化 userData 下的 config / shared / 内置脚本路径；
- * - 注册 IPC（窗口控制、共享设置、凭证、本地脚本读取、外链等）；
+ * - 注册 IPC（窗口控制、共享设置、本地脚本读取、外链等）；
  * - Steam 渠道时初始化 steamworks 与微交易回调；
- * - 正式包启用 electron-updater 自动更新；
  * - 开发时监视 dist/electron/xiaochao.js 变更并通知渲染进程热重载。
  *
  * 本地脚本注入由 preload（electron_frame.cjs）通过 read-local-script 完成；
@@ -15,17 +14,12 @@
 
 const { app, BrowserWindow, ipcMain, shell, dialog, globalShortcut, Menu, systemPreferences, screen, powerSaveBlocker } = require('electron')
 const { crashReporter, session  } = require('electron')
-/** electron-updater 实例；加载失败时保持 null 并记录原因。 */
-let autoUpdater = null;
-let autoUpdaterLoadError = null;
-let updateHandleInitialized = false;
 
-const { scheduleMicroClientUpdate } = require('./tools/release-app-shell/micro-client-update');
 const fs = require('fs');
 const crypto = require('crypto');
 const path = require('path')
 const os = require('os')
-const { createSharedStore, normalizeCredentials: normalizeSharedCredentials } = require('./shared-store.cjs')
+const { createSharedStore } = require('./shared-store.cjs')
 const { createHtmlReportOpener } = require('./report-window.cjs')
 
 
@@ -187,15 +181,6 @@ async function createWindow() {
         }
     }
     mainWindow.loadFile('./index_wd.html');
-    scheduleMicroClientUpdate({
-        app,
-        dialog,
-        BrowserWindow,
-        screen,
-        getMainWindow: () => mainWindow,
-        logMessage,
-        getScriptPath: () => scriptPath
-    });
     if (config.get('firstTime', true) === true || config.get('firstTimeAnnouncementSeen', false) !== true) {
         firstTimeAnnouncement(mainWindow);
     }
@@ -265,9 +250,6 @@ async function createWindow() {
 
         mainWindow.webContents.send('onF6', 1);
     })
-    if (global.platform == 0) {
-        updateHandle();
-    }
 }
 
 /** 注册 Steam 相关 IPC（Steam ID、成就、语言）与包信息快照。 */
@@ -339,6 +321,13 @@ ipcMain.on('show-context-menu', (event) => {
 
 ipcMain.handle('has-open-handler', () => true);
 
+// 只打开请求所在游戏 webview 的开发工具，避免进入外层壳页面。
+ipcMain.handle('open-game-devtools', (event) => {
+    if (event.sender.isDestroyed() || event.sender.getType() !== 'webview') return false;
+    event.sender.openDevTools({ mode: 'detach' });
+    return true;
+});
+
 ipcMain.handle('open-window', (event, url) => {
     return openXcWindow(url);
 });
@@ -358,10 +347,6 @@ ipcMain.on('setBounds', () => {
     });
 });
 
-ipcMain.handle('get-userlist', () => config.get('userlist', []));
-ipcMain.handle('save-userlist', (event, userlist) => {
-    config.set('userlist', Array.isArray(userlist) ? userlist : []);
-});
 
 //initCrash();
 
@@ -502,97 +487,6 @@ app.on('web-contents-created', (e, webContents) => {
 // In this file you can include the rest of your app's specific main process
 // code. You can also put them in separate files and require them here.
 
-/** 惰性加载 electron-updater；Node 过旧或缺 fs/promises 时禁用。 */
-function loadAutoUpdaterCompat() {
-    if (autoUpdater) return autoUpdater;
-    if (autoUpdaterLoadError) return null;
-
-    const nodeMajor = Number(String(process.versions && process.versions.node || '0').split('.')[0]);
-    if (nodeMajor && nodeMajor < 14) {
-        autoUpdaterLoadError = new Error('electron-updater requires fs/promises, current Node is ' + process.versions.node);
-        console.warn('electron-updater disabled for this runtime:', autoUpdaterLoadError.message);
-        return null;
-    }
-
-    try {
-        require('fs/promises');
-        autoUpdater = require("electron-updater").autoUpdater;
-        return autoUpdater;
-    } catch (error) {
-        autoUpdaterLoadError = error;
-        console.warn('electron-updater disabled for this runtime:', error.message);
-        return null;
-    }
-}
-
-/** 正式包自动更新：检查、下载进度转发、下载完成后 quitAndInstall。 */
-function updateHandle() {
-    if (!app.isPackaged) return;
-    if (updateHandleInitialized) return;
-    updateHandleInitialized = true;
-
-    const updater = loadAutoUpdaterCompat();
-    if (!updater) {
-        ipcMain.on("checkForUpdate", () => {
-            const reason = autoUpdaterLoadError ? autoUpdaterLoadError.message : 'unknown reason';
-            console.log('autoUpdater unavailable, skip update check:', reason);
-        });
-        mainWindow.once('focus', () => mainWindow.flashFrame(false));
-        return;
-    }
-
-    let message = {
-        error: '检查更新出错',
-        checking: '正在检查更新……',
-        updateAva: '检测到新版本，正在下载……',
-        updateNotAva: '现在使用的就是最新版本，不用更新',
-    };
-
-    let uploadUrl = global.AutoUpdaterURL[global.PackageId - 1];
-
-    updater.setFeedURL(uploadUrl);
-    updater.on('error', function (error) {
-        sendUpdateMessage(message.error)
-    });
-    updater.on('checking-for-update', function () {
-        sendUpdateMessage(message.checking)
-    });
-    updater.on('update-available', function (info) {
-        //sendUpdateMessage(message.updateAva)
-    });
-    updater.on('update-not-available', function (info) {
-        sendUpdateMessage(message.updateNotAva)
-    });
-
-    // 更新下载进度事件
-    updater.on('download-progress', function (progressObj) {
-        mainWindow.webContents.send('downloadProgress', progressObj)
-    })
-    updater.on('update-downloaded', function (event, releaseNotes, releaseName, releaseDate, updateUrl, quitAndUpdate) {
-        updater.quitAndInstall();
-        // ipcMain.on('isUpdateNow', (e, arg) => {
-        //     console.log(arguments);
-        //     console.log("开始更新");
-        //     //some code here to handle event
-        //     autoUpdater.quitAndInstall();
-        // });
-        //mainWindow.webContents.send('isUpdateNow')
-    })
-    ipcMain.on("checkForUpdate", () => {
-        //执行自动更新检查
-        updater.checkForUpdates();
-        // mainWindow.webContents.send('downloadProgress', { "bytesPerSecoend": 111, "delta": 11, "percent": 2, "total": 30, "transferred": 32 })
-    })
-
-    mainWindow.once('focus', () => mainWindow.flashFrame(false))
-}
-
-/** 向渲染进程推送更新状态文案。 */
-function sendUpdateMessage(text) {
-    mainWindow.webContents.send('message', text)
-}
-
-// —— 窗口控制 IPC ——
 ipcMain.on('window-min', function () {
     mainWindow.minimize();
 })
@@ -699,7 +593,8 @@ function createJsonConfig(filePath) {
         },
         ensureDefaults(defaults) {
             const store = readStore();
-            let changed = false;
+            let changed = Object.prototype.hasOwnProperty.call(store, 'userlist');
+            delete store.userlist;
             Object.keys(defaults).forEach((key) => {
                 if (!Object.prototype.hasOwnProperty.call(store, key)) {
                     store[key] = defaults[key];
@@ -757,29 +652,6 @@ ipcMain.on('xiaochao-setting-delete-sync', (event, key) => {
         event.returnValue = true;
     } catch (error) {
         console.error('shared setting delete failed:', error);
-        event.returnValue = false;
-    }
-});
-
-ipcMain.on('xiaochao-credentials-get-sync', (event, payload) => {
-    const scope = payload && !Array.isArray(payload) ? payload.scope : 'official';
-    const localCredentials = payload && !Array.isArray(payload) ? payload.localCredentials : payload;
-    try {
-        event.returnValue = getSharedConfig().getCredentials(scope, localCredentials);
-    } catch (error) {
-        console.error('shared credentials read failed:', error);
-        event.returnValue = normalizeSharedCredentials(localCredentials);
-    }
-});
-
-ipcMain.on('xiaochao-credentials-set-sync', (event, payload) => {
-    const scope = payload && !Array.isArray(payload) ? payload.scope : 'official';
-    const credentials = payload && !Array.isArray(payload) ? payload.credentials : payload;
-    try {
-        getSharedConfig().setCredentials(scope, credentials);
-        event.returnValue = true;
-    } catch (error) {
-        console.error('shared credentials write failed:', error);
         event.returnValue = false;
     }
 });

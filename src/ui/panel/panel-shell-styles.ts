@@ -973,6 +973,31 @@ const PANEL_SHELL_CSS_SOURCE = `
   font-variant-numeric: tabular-nums;
 }
 
+/* 微端悬浮底栏：标题与标签同一行，内容独立滚动，不占用游戏布局。 */
+#createIframe.createIframe.xiaochao-panel--fixed-bottom {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: 26px minmax(0, 1fr);
+  border-radius: 0;
+  clip-path: none;
+  border-top: 1px solid rgba(242, 222, 156, .3);
+  transition: none;
+}
+#createIframe.xiaochao-panel--fixed-bottom .xc-frame-header {
+  cursor: default;
+}
+#createIframe.xiaochao-panel--fixed-bottom .xiaochao-panel__content {
+  grid-column: 1 / -1;
+  min-height: 0;
+  overflow-y: auto;
+}
+#createIframe.xiaochao-panel--fixed-bottom .xiaochao-cards-pane {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
+  align-content: start;
+  align-items: start;
+  gap: 8px;
+}
 /* @property / conic 动画放到末尾：旧 Chromium 若解析失败，不影响上方开关等关键样式 */
 @property --xiaochao-border-angle {
   syntax: '<angle>';

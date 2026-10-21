@@ -1,4 +1,9 @@
-# 三国杀小抄
+# 三国杀小抄（个人版改造中）
+
+已移除密码管理器和统计脚本，停用第三方自动更新及在线礼包码注册。完整风险与未完成项见 [安全审计记录](docs/SECURITY_AUDIT.md)。以下为上游开发与发布说明，原作者发布服务不作为个人版依赖。
+
+- [助手功能清单](docs/FEATURES.md)：双端功能、默认开关、已下线功能和个人版变更。
+- 密码管理已移除；新版微端会定向清理旧助手密码数据。游戏本身的登录仍保留。
 
 为三国杀 OL 提供微端脚本和浏览器 userscript。功能代码位于 `src/`，打包时会同时生成两种版本。
 
@@ -64,20 +69,3 @@ npm run dev:userscript   # 启动浏览器脚本开发服务器
 
    这只同步下载目录。门户页面代码有改动时，才使用门户项目的 `npm run deploy`。
 
-5. 更新微端和游戏内“检查更新”读取的 API 清单。在 `../sgs-xc-server` 目录执行：
-
-   ```powershell
-   cd ..\sgs-xc-server
-   scp data/xiaochao-manifest.json admin@123.56.3.130:/opt/sgs-xc-server/data/xiaochao-manifest.json.tmp
-   ssh admin@123.56.3.130 "mv /opt/sgs-xc-server/data/xiaochao-manifest.json.tmp /opt/sgs-xc-server/data/xiaochao-manifest.json"
-   ```
-
-   API 每次请求都会读取清单文件，更新后无需重启服务。
-
-6. 确认以下地址已返回新版本和对应文件：
-
-   - <https://95chong.cn/api/xiaochao-version>：更新检查使用的 API 清单，必须同步。
-   - <https://xc.95chong.cn/downloads/manifest.json>：下载页用它选择版本化的微端安装包。
-   - <https://xc.95chong.cn/downloads/sgs-xc.user.js>：浏览器脚本。
-
-微端启动时通过 API 检查版本；发现新版本后，用户确认并通过 Windows UAC，微端才会替换安装文件。浏览器脚本的检查更新按钮也读取 API 清单；Tampermonkey 根据脚本的 `@updateURL` 更新脚本。

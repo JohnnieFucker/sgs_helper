@@ -4,6 +4,10 @@
  * pointerdown 冒泡给父级启动拖拽；折叠按钮自身 stop 以免误拖。
  */
 defineProps({
+  collapsible: {
+    type: Boolean,
+    default: true,
+  },
   collapsed: {
     type: Boolean,
     required: true,
@@ -23,6 +27,7 @@ defineEmits(['toggle', 'drag-start']);
       <slot />
     </div>
     <button
+      v-if="collapsible"
       type="button"
       id="toggle-me"
       class="xc-frame-toggle xiaochao-panel__toggle"

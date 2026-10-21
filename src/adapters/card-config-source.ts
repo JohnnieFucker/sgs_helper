@@ -46,11 +46,12 @@ interface ZipFile { async(type: 'arraybuffer'): Promise<ArrayBuffer> }
 interface ZipArchive { file(name: string): ZipFile | null }
 interface GameConfigCodecs {
   loadZip(data: ArrayBuffer): Promise<ZipArchive>;
-  decrypt(data: ArrayBuffer): unknown;
-  gunzip(data: unknown): Uint8Array;
+  decrypt?: (data: ArrayBuffer) => unknown;
+  gunzip?: (data: unknown) => Uint8Array;
 }
 
 const CONFIG_PATH = '/220/h5_2/res/config/Config_w.sgs';
+const JSON_CONFIG_PATH = '/220/miniGame/release/cfg/laya_json_release.cfg';
 const CONFIG_ORIGIN = 'https://web.sanguosha.com';
 const TEST_CONFIG_URL = 'https://test.sanguosha.com/h5/res/config//Config_w.sgs';
 const ROGUE_MAP_CONFIG_FILE = 'hd_roguelike.sgs';
@@ -59,8 +60,8 @@ const DOWNLOAD_TIMEOUT_MS = 20000;
 const DOWNLOAD_ATTEMPTS = 3;
 
 /**
- * 自行下载游戏的 Config_w.sgs，并用游戏页面自带的 JSZip / CtrUtil / Zlib 解出
- * sys_playcard、cha_spell、自动任务表与山河地图表。
+ * 复用游戏对应的配置包：新版微端读取 JSON ZIP，旧版读取加密的 Config_w.sgs。
+ * 两种格式共用卡牌、自动任务、山河及进阶辅助解析流程。
  */
 export function installCardConfigSource(globalObject: Window = window): CardConfigSource {
   let dictionary: CardConfigDictionary | null = null;
@@ -328,8 +329,13 @@ async function readConfigFile(
   codecs: GameConfigCodecs,
   fileName: string
 ): Promise<unknown> {
+  const jsonFile = archive.file(fileName.replace(/\.sgs$/, '.json'));
+  if (jsonFile) {
+    return JSON.parse(new TextDecoder().decode(await jsonFile.async('arraybuffer')));
+  }
   const file = archive.file(fileName);
-  if (!file) throw new Error(`Config_w.sgs 缺少 ${fileName}`);
+  if (!file) throw new Error(`配置包缺少 ${fileName}`);
+  if (!codecs.decrypt || !codecs.gunzip) throw new Error(`加密配置 ${fileName} 缺少解码器`);
   const encrypted = await file.async('arraybuffer');
   return JSON.parse(new TextDecoder().decode(codecs.gunzip(codecs.decrypt(encrypted))));
 }
@@ -337,23 +343,24 @@ async function readConfigFile(
 /** 优先复用游戏自己已经请求过的地址，命中浏览器缓存且版本号一致。 */
 function resolveConfigUrl(globalObject: Window): string {
   if (globalObject.location.host === 'test.sanguosha.com') return TEST_CONFIG_URL;
+  const configPath = usesJsonConfigArchive(globalObject) ? JSON_CONFIG_PATH : CONFIG_PATH;
   try {
     const entries = globalObject.performance.getEntriesByType('resource');
     for (let index = entries.length - 1; index >= 0; index -= 1) {
       const entry = entries[index] as PerformanceResourceTiming;
-      if (entry.responseEnd > 0 && isConfigArchiveUrl(entry.name, globalObject)) return entry.name;
+      if (entry.responseEnd > 0 && isConfigArchiveUrl(entry.name, globalObject, configPath)) return entry.name;
     }
   } catch {
     // Performance API 不可用时回退到按 resourceVersion 拼接的地址。
   }
   const version = (globalObject as unknown as UnknownRecord).resourceVersion;
-  return `${CONFIG_ORIGIN}${CONFIG_PATH}?v=${version ?? ''}`;
+  return `${CONFIG_ORIGIN}${configPath}?v=${version ?? ''}`;
 }
 
-function isConfigArchiveUrl(url: string, globalObject: Window): boolean {
+function isConfigArchiveUrl(url: string, globalObject: Window, configPath: string): boolean {
   try {
     const parsed = new URL(url, globalObject.location.href);
-    return parsed.origin === CONFIG_ORIGIN && parsed.pathname.replace(/\/+/g, '/') === CONFIG_PATH;
+    return parsed.origin === CONFIG_ORIGIN && parsed.pathname.replace(/\/+/g, '/') === configPath;
   } catch {
     return false;
   }
@@ -380,6 +387,12 @@ async function downloadArchive(url: string): Promise<ArrayBuffer> {
 declare const JSZip: unknown;
 declare const CtrUtil: unknown;
 declare const Zlib: unknown;
+
+/** 新版微端由配置开关选择 JSON 包，不需要旧版 WASM 解码器。 */
+function usesJsonConfigArchive(globalObject: Window): boolean {
+  const globals = globalObject as unknown as UnknownRecord;
+  return Boolean(globals.useMiniGameResourceMode || globals.useRemoteUrl);
+}
 
 /** 游戏用顶层 let/const 声明这些库，只存在于全局词法作用域，不挂在 window 上。 */
 function readGameGlobals(globalObject: Window): Record<'JSZip' | 'CtrUtil' | 'Zlib', unknown> {
@@ -408,11 +421,12 @@ function readGameConfigCodecs(globalObject: Window): GameConfigCodecs | null {
   const loadAsync = jsZip?.loadAsync;
   const decrypt = ctr?.Ofb_Dec;
   const Gunzip = zlib?.Gunzip as (new (data: unknown) => { decompress(): Uint8Array }) | undefined;
-  if (typeof loadAsync !== 'function' || typeof decrypt !== 'function' || typeof Gunzip !== 'function') return null;
+  if (typeof loadAsync !== 'function') return null;
+  if (!usesJsonConfigArchive(globalObject) && (typeof decrypt !== 'function' || typeof Gunzip !== 'function')) return null;
   return {
     loadZip: (data) => (loadAsync as (data: ArrayBuffer) => Promise<ZipArchive>).call(jsZip, data),
-    decrypt: (data) => (decrypt as (data: ArrayBuffer) => unknown).call(ctr, data),
-    gunzip: (data) => new Gunzip(data).decompress()
+    decrypt: typeof decrypt === 'function' ? (data) => decrypt.call(ctr, data) : undefined,
+    gunzip: typeof Gunzip === 'function' ? (data) => new Gunzip(data).decompress() : undefined
   };
 }
 

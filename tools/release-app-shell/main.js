@@ -1,19 +1,15 @@
 // Modules to control application life and create native browser window
 const { app, BrowserWindow, ipcMain, shell, dialog, globalShortcut, Menu, systemPreferences, screen, powerSaveBlocker } = require('electron')
 const { crashReporter, session  } = require('electron')
-let autoUpdater = null;
-let autoUpdaterLoadError = null;
-let updateHandleInitialized = false;
 
 const fs = require('fs');
 const crypto = require('crypto');
 const path = require('path')
 const os = require('os')
-const { createSharedStore, createJsonConfig, normalizeCredentials: normalizeSharedCredentials } = require('./shared-store')
+const { createSharedStore, createJsonConfig } = require('./shared-store')
 const { selectInstanceProfile } = require('./instance-profile')
 const instanceProfile = selectInstanceProfile(app)
 const { createHtmlReportOpener } = require('./report-window')
-const { scheduleMicroClientUpdate } = require('./micro-client-update')
 
 
 const steamAppID = 4209770;
@@ -253,15 +249,6 @@ async function createWindow() {
         }
     }
     mainWindow.loadFile('./index_wd.html');
-    scheduleMicroClientUpdate({
-        app,
-        dialog,
-        BrowserWindow,
-        screen,
-        getMainWindow: () => mainWindow,
-        logMessage,
-        getScriptPath: () => scriptPath
-    });
     if (config.get('firstTime', true) === true || config.get('firstTimeAnnouncementSeen', false) !== true) {
         firstTimeAnnouncement(mainWindow);
     }
@@ -331,9 +318,6 @@ async function createWindow() {
 
         mainWindow.webContents.send('onF6', 1);
     })
-    if (global.platform == 0) {
-        updateHandle();
-    }
 }
 
 function initEvent() {
@@ -405,6 +389,13 @@ ipcMain.on('show-context-menu', (event) => {
 
 ipcMain.handle('has-open-handler', () => true);
 
+// 只打开请求所在游戏 webview 的开发工具，避免进入外层壳页面。
+ipcMain.handle('open-game-devtools', (event) => {
+    if (event.sender.isDestroyed() || event.sender.getType() !== 'webview') return false;
+    event.sender.openDevTools({ mode: 'detach' });
+    return true;
+});
+
 ipcMain.handle('open-window', (event, request) => {
     const url = typeof request === 'string' ? request : request?.url;
     const sourceId = typeof request?.sourceId === 'string' ? request.sourceId : '';
@@ -426,10 +417,6 @@ ipcMain.on('setBounds', () => {
     });
 });
 
-ipcMain.handle('get-userlist', () => config.get('userlist', []));
-ipcMain.handle('save-userlist', (event, userlist) => {
-    config.set('userlist', Array.isArray(userlist) ? userlist : []);
-});
 
 //initCrash();
 
@@ -566,95 +553,6 @@ app.on('web-contents-created', (e, webContents) => {
 // In this file you can include the rest of your app's specific main process
 // code. You can also put them in separate files and require them here.
 
-function loadAutoUpdaterCompat() {
-    if (autoUpdater) return autoUpdater;
-    if (autoUpdaterLoadError) return null;
-
-    const nodeMajor = Number(String(process.versions && process.versions.node || '0').split('.')[0]);
-    if (nodeMajor && nodeMajor < 14) {
-        autoUpdaterLoadError = new Error('electron-updater requires fs/promises, current Node is ' + process.versions.node);
-        console.warn('electron-updater disabled for this runtime:', autoUpdaterLoadError.message);
-        return null;
-    }
-
-    try {
-        require('fs/promises');
-        autoUpdater = require("electron-updater").autoUpdater;
-        return autoUpdater;
-    } catch (error) {
-        autoUpdaterLoadError = error;
-        console.warn('electron-updater disabled for this runtime:', error.message);
-        return null;
-    }
-}
-
-// 检测更新，在你想要检查更新的时候执行，renderer事件触发后的操作自行编写
-function updateHandle() {
-    if (updateHandleInitialized) return;
-    updateHandleInitialized = true;
-
-    const updater = loadAutoUpdaterCompat();
-    if (!updater) {
-        ipcMain.on("checkForUpdate", () => {
-            const reason = autoUpdaterLoadError ? autoUpdaterLoadError.message : 'unknown reason';
-            console.log('autoUpdater unavailable, skip update check:', reason);
-        });
-        mainWindow.once('focus', () => mainWindow.flashFrame(false));
-        return;
-    }
-
-    let message = {
-        error: '检查更新出错',
-        checking: '正在检查更新……',
-        updateAva: '检测到新版本，正在下载……',
-        updateNotAva: '现在使用的就是最新版本，不用更新',
-    };
-
-    let uploadUrl = global.AutoUpdaterURL[global.PackageId - 1];
-
-    updater.setFeedURL(uploadUrl);
-    updater.on('error', function (error) {
-        sendUpdateMessage(message.error)
-    });
-    updater.on('checking-for-update', function () {
-        sendUpdateMessage(message.checking)
-    });
-    updater.on('update-available', function (info) {
-        //sendUpdateMessage(message.updateAva)
-    });
-    updater.on('update-not-available', function (info) {
-        sendUpdateMessage(message.updateNotAva)
-    });
-
-    // 更新下载进度事件
-    updater.on('download-progress', function (progressObj) {
-        mainWindow.webContents.send('downloadProgress', progressObj)
-    })
-    updater.on('update-downloaded', function (event, releaseNotes, releaseName, releaseDate, updateUrl, quitAndUpdate) {
-        updater.quitAndInstall();
-        // ipcMain.on('isUpdateNow', (e, arg) => {
-        //     console.log(arguments);
-        //     console.log("开始更新");
-        //     //some code here to handle event
-        //     autoUpdater.quitAndInstall();
-        // });
-        //mainWindow.webContents.send('isUpdateNow')
-    })
-    ipcMain.on("checkForUpdate", () => {
-        //执行自动更新检查
-        updater.checkForUpdates();
-        // mainWindow.webContents.send('downloadProgress', { "bytesPerSecoend": 111, "delta": 11, "percent": 2, "total": 30, "transferred": 32 })
-    })
-
-    mainWindow.once('focus', () => mainWindow.flashFrame(false))
-}
-
-// 通过main进程发送事件给renderer进程，提示更新信息
-function sendUpdateMessage(text) {
-    mainWindow.webContents.send('message', text)
-}
-
-//接收最小化命令
 ipcMain.on('window-min', function () {
     mainWindow.minimize();
 })
@@ -796,29 +694,6 @@ ipcMain.handle('xiaochao-game-records', (event, operation) => {
         ...operation,
         source: instanceProfile.slot + ':' + new URL(event.sender.getURL()).origin
     });
-});
-
-ipcMain.on('xiaochao-credentials-get-sync', (event, payload) => {
-    const scope = payload && !Array.isArray(payload) ? payload.scope : 'official';
-    const localCredentials = payload && !Array.isArray(payload) ? payload.localCredentials : payload;
-    try {
-        event.returnValue = getSharedConfig().getCredentials(scope, localCredentials);
-    } catch (error) {
-        console.error('shared credentials read failed:', error);
-        event.returnValue = normalizeSharedCredentials(localCredentials);
-    }
-});
-
-ipcMain.on('xiaochao-credentials-set-sync', (event, payload) => {
-    const scope = payload && !Array.isArray(payload) ? payload.scope : 'official';
-    const credentials = payload && !Array.isArray(payload) ? payload.credentials : payload;
-    try {
-        getSharedConfig().setCredentials(scope, credentials);
-        event.returnValue = true;
-    } catch (error) {
-        console.error('shared credentials write failed:', error);
-        event.returnValue = false;
-    }
 });
 
 function readLocalScriptCached() {

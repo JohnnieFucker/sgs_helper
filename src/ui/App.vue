@@ -85,7 +85,7 @@ const savedTabId = props.configStore.get('panel.activeTab');
 const initialTabId: XiaochaoPanelTabId = XIAOCHAO_PANEL_TABS.some((tab) => tab.id === savedTabId)
   ? savedTabId
   : 'cards';
-const initialCollapsed = props.configStore.get('panel.collapsed');
+const initialCollapsed = props.platform === 'electron' ? false : props.configStore.get('panel.collapsed');
 const panel = createXiaochaoPanelModel(
   initialTabId,
   showTabContent,
@@ -95,7 +95,8 @@ const panel = createXiaochaoPanelModel(
 // 根级 ref 直接驱动模板与标题栏，折叠切换时同步更新状态文案。
 const isCollapsed = panel.isCollapsed;
 const panelElement = ref<HTMLElement>();
-const isDockedRight = ref(props.configStore.get('panel.dockedRight'));
+const isFixedBottomPanel = props.platform === 'electron';
+const isDockedRight = ref(!isFixedBottomPanel && props.configStore.get('panel.dockedRight'));
 const isDockPreviewVisible = ref(false);
 const isDockPreviewActive = ref(false);
 const toolsHasUpdate = ref(props.updateNoticeController?.getSnapshot().hasUpdate ?? false);
@@ -110,6 +111,16 @@ function openXiaochaoSite(): void {
     : createUserscriptPlatform();
   void adapter.openExternal('https://xc.95chong.cn/');
 }
+async function openGameConsole(): Promise<void> {
+  try {
+    const opened = await window.electron?.invoke?.('open-game-devtools');
+    if (opened !== true) throw new Error('游戏控制台接口不可用');
+  } catch (error) {
+    console.warn('[xiaochao] 打开游戏控制台失败:', error);
+    showToast('打开失败，请完全退出并重新启动微端后重试', 'error', 4000);
+  }
+}
+
 let expandedHeight = '';
 let expandedWidth = '';
 let stopDragging: (() => void) | undefined;
@@ -127,9 +138,12 @@ onMounted(() => {
   shell.style.fontFamily = props.layout.fontFamily;
   expandedHeight = `${props.layout.height}px`;
   expandedWidth = props.layout.width;
-  if (isDockedRight.value) applyRightDock(shell);
-  else restoreSavedPosition(shell);
-  if (panel.isCollapsed.value) applyCollapsedDimensions(shell);
+  if (isFixedBottomPanel) applyBottomDock(shell);
+  else {
+    if (isDockedRight.value) applyRightDock(shell);
+    else restoreSavedPosition(shell);
+    if (panel.isCollapsed.value) applyCollapsedDimensions(shell);
+  }
   window.addEventListener('resize', keepPanelInsideViewport);
 });
 
@@ -144,6 +158,7 @@ onBeforeUnmount(() => {
 function toggleCollapsed(): void {
   const shell = panelElement.value;
   if (!shell) return;
+  if (isFixedBottomPanel) return;
   if (!panel.isCollapsed.value) {
     expandedHeight = getOwnedPanelLayoutValue(shell, 'height') || `${shell.offsetHeight}px`;
     expandedWidth = getOwnedPanelLayoutValue(shell, 'width') || props.layout.width;
@@ -170,7 +185,6 @@ function resetXiaochaoConfig(): void {
     const credentialKeys = ['sgsol.rememberedCredentials.v2', 'sgsol.rememberedCredentials.v2.4399'];
     for (const key of credentialKeys) {
       window.localStorage.removeItem(key);
-      window.xiaochaoStorage?.saveCredentials?.(key.endsWith('.4399') ? '4399' : 'official', []);
     }
     for (const key of Object.keys(window.sessionStorage)) {
       if (key.startsWith('XC') || key.toLowerCase().includes('xiaochao')) window.sessionStorage.removeItem(key);
@@ -211,7 +225,7 @@ function showTabContent(tabId: XiaochaoPanelTabId): void {
 }
 
 function handleDragStart(event: PointerEvent): void {
-  if (event.button !== 0 || !panelElement.value) return;
+  if (isFixedBottomPanel || event.button !== 0 || !panelElement.value) return;
   event.preventDefault();
   const shell = panelElement.value;
   const header = event.currentTarget as HTMLElement;
@@ -300,6 +314,19 @@ function handleDragStart(event: PointerEvent): void {
   header.addEventListener('lostpointercapture', handleInterruptedDrag, { once: true });
 }
 
+/** 微端助手始终展开，悬浮于游戏底部，不改写游戏视口。 */
+function applyBottomDock(shell: HTMLElement): void {
+  const height = Math.min(150, window.innerHeight * 0.5);
+  restoreFullGameArea();
+  setOwnedPanelLayout(shell, {
+    left: '0px',
+    right: '0px',
+    top: `${window.innerHeight - height}px`,
+    width: '100vw',
+    height: `${height}px`
+  });
+}
+
 function applyRightDock(shell: HTMLElement): void {
   isDockedRight.value = true;
   setOwnedPanelLayout(shell, {
@@ -357,6 +384,7 @@ function restoreSavedPosition(shell: HTMLElement): void {
 function keepPanelInsideViewport(): void {
   const shell = panelElement.value;
   if (!shell) return;
+  if (isFixedBottomPanel) return applyBottomDock(shell);
   if (isDockedRight.value) return applyRightDock(shell);
   const bounds = shell.getBoundingClientRect();
   const position = constrainPanelPosition(bounds, bounds, {
@@ -366,9 +394,11 @@ function keepPanelInsideViewport(): void {
   setOwnedPanelLayout(shell, { left: `${position.left}px`, top: `${position.top}px`, right: 'auto' });
 }
 
-/** 展开停靠时压缩游戏区域；折叠后立即归还空间，避免留下无意义空白。 */
+/** 微端保持原始游戏视口；浏览器右侧停靠时预留宽度。 */
 function syncDockedGameLayout(shell: HTMLElement): void {
-  if (isDockedRight.value && !panel.isCollapsed.value) {
+  if (isFixedBottomPanel) {
+    restoreFullGameArea();
+  } else if (isDockedRight.value && !panel.isCollapsed.value) {
     reserveGameAreaForDockedPanel(shell.getBoundingClientRect().width);
   } else {
     restoreFullGameArea();
@@ -377,7 +407,7 @@ function syncDockedGameLayout(shell: HTMLElement): void {
 
 /** 调整面板高度；限制在标题栏以下和当前窗口可见区域以内。 */
 function handleResizeStart(event: PointerEvent): void {
-  if (event.button !== 0 || !panelElement.value) return;
+  if (isFixedBottomPanel || event.button !== 0 || !panelElement.value) return;
   const shell = panelElement.value;
   const startY = event.clientY;
   const startHeight = shell.offsetHeight;
@@ -409,11 +439,13 @@ function handleResizeStart(event: PointerEvent): void {
     class="createIframe xiaochao-panel"
     :class="{
       'xiaochao-panel--collapsed': isCollapsed,
-      'xiaochao-panel--docked-right': isDockedRight
+      'xiaochao-panel--docked-right': isDockedRight,
+      'xiaochao-panel--fixed-bottom': isFixedBottomPanel
     }"
     aria-label="三国杀小抄"
   >
     <PanelHeader
+      :collapsible="!isFixedBottomPanel"
       :collapsed="isCollapsed"
       @toggle="toggleCollapsed"
       @drag-start="handleDragStart"
@@ -469,6 +501,15 @@ function handleResizeStart(event: PointerEvent): void {
       <VersionNoticeSection :update-notice-controller="updateNoticeController" />
       <section class="xiaochao-settings-section" aria-label="工具栏">
         <div class="xiaochao-settings-section__body xiaochao-tools-entry__actions">
+          <button
+            v-if="platform === 'electron'"
+            type="button"
+            class="xiaochao-block-entry xiaochao-block-entry--center"
+            data-tooltip="打开游戏页面的开发工具，切换到 Console 可执行调试命令"
+            @click="openGameConsole"
+          >
+            <span>游戏控制台</span>
+          </button>
           <GuanxingEntry :platform="platform" />
           <button
             type="button"
@@ -495,7 +536,7 @@ function handleResizeStart(event: PointerEvent): void {
       :style="{ display: isCollapsed || panel.activeTabId.value === 'cards' || panel.activeTabId.value === 'tools' || panel.activeTabId.value === 'rogue' ? 'none' : '' }"
     />
     <div
-      v-show="!isCollapsed"
+      v-show="!isCollapsed && !isFixedBottomPanel"
       id="frame-resize-handle"
       data-tooltip="拖动调整高度"
       @pointerdown.stop="handleResizeStart"

@@ -53,7 +53,6 @@ import { createPeixiuRouteStore, installExtraAssistController } from '../feature
 import { installAutoHgController } from '../features/auto-hg';
 import { installAutoBotController } from '../features/auto-bot';
 import { installUpdateNoticeController } from '../features/update-notice';
-import { installGiftCodeController } from '../features/gift-code';
 import { installRuntimeSearchController } from '../features/runtime-search';
 import { installHandSortController } from '../features/cards/hand-sort-controller';
 import { installSelectionToolsController } from '../features/cards/selection-tools-controller';
@@ -151,7 +150,6 @@ export function bootstrapXiaochao(platform: PlatformAdapter): void {
     cardConfigSource
   });
   lifecycle.register(autoTask.dispose);
-  lifecycle.register(installGiftCodeController());
   lifecycle.register(installRuntimeSearchController());
   const extraAssist = installExtraAssistController(configStore, {
     getExtraAssistData: () => cardConfigSource.getExtraAssistData(),
@@ -165,7 +163,7 @@ export function bootstrapXiaochao(platform: PlatformAdapter): void {
   lifecycle.register(autoHg.dispose);
   const autoBot = installAutoBotController(configStore, { gameEvents });
   lifecycle.register(autoBot.dispose);
-  const updateNotice = installUpdateNoticeController(configStore, (url) => platform.openExternal(url));
+  const updateNotice = installUpdateNoticeController(configStore, (url) => platform.openExternal(url), { skipRemoteCheck: true });
   lifecycle.register(updateNotice.dispose);
   const rogue = installRogueController(configStore, { cardConfigSource });
   lifecycle.register(rogue.dispose);

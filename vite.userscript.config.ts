@@ -109,7 +109,7 @@ export default defineConfig({
       entry: 'src/entries/userscript.ts',
       userscript: {
         name: '三国杀小抄',
-        namespace: 'https://95chong.cn/',
+        namespace: 'sgs-helper-personal',
         version: xiaochaoVersion,
         description: '三国杀OL辅助插件',
         author: 'many people',
@@ -134,8 +134,7 @@ export default defineConfig({
         ],
         grant: 'none',
         'run-at': 'document-start',
-        downloadURL: 'https://xc.95chong.cn/downloads/sgs-xc.user.js',
-        updateURL: 'https://xc.95chong.cn/downloads/sgs-xc.user.js'
+        updateURL: 'none'
       },
       build: { fileName: 'xiaochao.user.js' }
     }),

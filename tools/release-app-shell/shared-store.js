@@ -9,54 +9,6 @@ function sleepSync(milliseconds) {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
 }
 
-function normalizeCredentials(list) {
-    if (!Array.isArray(list)) return [];
-    const result = [];
-    for (const item of list) {
-        const account = String(item && item.account || '').trim();
-        const password = String(item && item.password || '');
-        if (!account || !password) continue;
-        const normalized = {
-            account,
-            password,
-            updatedAt: Number(item && item.updatedAt) || Date.now(),
-            remark: String(item && item.remark || '').trim().slice(0, 24)
-        };
-        const index = result.findIndex((entry) => entry.account === account);
-        if (index >= 0) result[index] = normalized;
-        else result.push(normalized);
-    }
-    return result.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 30);
-}
-
-function normalizeCredentialScope(scope) {
-    const normalized = String(scope || 'official').trim();
-    return normalized && normalized.length <= 64 ? normalized : 'official';
-}
-
-function parseCredentialArguments(scopeOrCredentials, credentials) {
-    if (Array.isArray(scopeOrCredentials)) {
-        return { scope: 'official', credentials: scopeOrCredentials };
-    }
-    return {
-        scope: normalizeCredentialScope(scopeOrCredentials),
-        credentials: Array.isArray(credentials) ? credentials : []
-    };
-}
-
-function ensureCredentialScopes(store) {
-    if (!store.credentialsByScope || typeof store.credentialsByScope !== 'object') {
-        store.credentialsByScope = {};
-    }
-    if (!store.credentialScopesInitialized || typeof store.credentialScopesInitialized !== 'object') {
-        store.credentialScopesInitialized = {};
-    }
-    if (store.credentialsInitialized === true && store.credentialScopesInitialized.official !== true) {
-        store.credentialsByScope.official = normalizeCredentials(store.credentials);
-        store.credentialScopesInitialized.official = true;
-    }
-}
-
 function createJsonStore(filePath) {
     const lockPath = filePath + '.lock';
 
@@ -129,6 +81,9 @@ function createJsonStore(filePath) {
 
 function createJsonConfig(filePath) {
     const { read, update } = createJsonStore(filePath);
+    if (Object.prototype.hasOwnProperty.call(read(), 'userlist')) {
+        update(store => { delete store.userlist; });
+    }
     return {
         get(key, fallback) {
             const store = read();
@@ -148,6 +103,12 @@ function createJsonConfig(filePath) {
 
 function createSharedStore(filePath) {
     const { read, update } = createJsonStore(filePath);
+    // 只清理旧助手密码字段，保留设置、战绩等其他数据。
+    const credentialKeys = ['credentials', 'credentialsByScope', 'credentialsInitialized', 'credentialScopesInitialized'];
+    const previous = read();
+    if (credentialKeys.some(key => Object.prototype.hasOwnProperty.call(previous, key))) {
+        update(store => { for (const key of credentialKeys) delete store[key]; });
+    }
     // 战绩可能远大于设置，独立落盘，避免每次读开关都解析整份历史。
     const gameRecordsStore = createJsonStore(path.join(path.dirname(filePath), 'game-records.json'));
     const nativeDirectory = path.join(path.dirname(filePath), 'native-settings');
@@ -263,34 +224,8 @@ function createSharedStore(filePath) {
                 if (!store.settingsInitialized) store.settingsInitialized = {};
                 store.settingsInitialized[key] = true;
             });
-        },
-        getCredentials(scopeOrCredentials, localCredentials) {
-            const parsed = parseCredentialArguments(scopeOrCredentials, localCredentials);
-            return update((store) => {
-                ensureCredentialScopes(store);
-                if (store.credentialScopesInitialized[parsed.scope] !== true) {
-                    const stored = normalizeCredentials(store.credentialsByScope[parsed.scope]);
-                    store.credentialsByScope[parsed.scope] = stored.length
-                        ? stored
-                        : normalizeCredentials(parsed.credentials);
-                    store.credentialScopesInitialized[parsed.scope] = true;
-                }
-                return normalizeCredentials(store.credentialsByScope[parsed.scope]);
-            });
-        },
-        setCredentials(scopeOrCredentials, credentials) {
-            const parsed = parseCredentialArguments(scopeOrCredentials, credentials);
-            update((store) => {
-                ensureCredentialScopes(store);
-                store.credentialsByScope[parsed.scope] = normalizeCredentials(parsed.credentials);
-                store.credentialScopesInitialized[parsed.scope] = true;
-                if (parsed.scope === 'official') {
-                    store.credentials = store.credentialsByScope.official;
-                    store.credentialsInitialized = true;
-                }
-            });
         }
     };
 }
 
-module.exports = { createSharedStore, createJsonConfig, createJsonStore, normalizeCredentials };
+module.exports = { createSharedStore, createJsonConfig, createJsonStore };

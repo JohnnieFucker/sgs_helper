@@ -169,7 +169,8 @@ export function installRogueMapController(
       const scene = asRecord(scenes[0]);
       if (scene && !scene.destroyed) return scene;
     }
-    return null;
+    const current = asRecord(locator.scene());
+    return current && !current.destroyed && current.CityRoot && current.cityItemDic ? current : null;
   }
 
   function findCityView(): UnknownRecord | null {
@@ -179,7 +180,9 @@ export function installRogueMapController(
     if (cityView && !cityView.destroyed && typeof cityView.GetCityItemById === 'function') {
       return cityView;
     }
-    return null;
+    // 新版微端的城市直接挂在 CityRoot，不再提供 cityView/GetCityItemById。
+    const cityRoot = asRecord(scene.CityRoot);
+    return cityRoot && !cityRoot.destroyed && typeof cityRoot.getChildAt === 'function' ? cityRoot : null;
   }
 
   /** 漏接同步包时，从 PveManager / 地图场景缓存回填或对齐 cities。 */
@@ -190,14 +193,16 @@ export function installRogueMapController(
       // 重新进入地图时走 reconcile / allow 分支。
       if (citiesSynced) return;
     }
-    const manager = asRecord(locator.manager('RogueLikePveManager'));
+    const mapScene = findMapScene();
+    const manager = asRecord(mapScene?.pveMgr) ?? asRecord(locator.manager('RogueLikePveManager'));
     const candidates = [
       manager,
       asRecord(manager?.allData),
+      asRecord(manager?.allDatas),
       asRecord(manager?.AllData),
       asRecord(manager?.data),
       asRecord(manager?.gameData),
-      asRecord(findMapScene())
+      mapScene
     ];
     for (const candidate of candidates) {
       if (!candidate) continue;
@@ -267,7 +272,8 @@ export function installRogueMapController(
     lastCityView = cityView;
 
     // 难度未同步前不按 raid 门控清空；只在已知 difficulty≤100 时等待 raid。
-    if (runtime.difficulty > 0 && needsRaidGate(runtime.difficulty) && !readRaidItem(cityView)) {
+    if (typeof cityView.GetCityItemById === 'function'
+      && runtime.difficulty > 0 && needsRaidGate(runtime.difficulty) && !readRaidItem(cityView)) {
       clear(cityView);
       publishDebug({ reason: 'raid-gate', cities, difficulty: runtime.difficulty });
       return;
